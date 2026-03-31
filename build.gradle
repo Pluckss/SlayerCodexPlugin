@@ -30,12 +30,6 @@ dependencies {
 group = 'com.slayercodex'
 version = '1.0-SNAPSHOT'
 
-java {
-	toolchain {
-		languageVersion = JavaLanguageVersion.of(11)
-	}
-}
-
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
 	options.release.set(11)
@@ -44,9 +38,6 @@ tasks.withType(JavaCompile).configureEach {
 tasks.register('run', JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass = pluginMainClass
-	javaLauncher = javaToolchains.launcherFor {
-		languageVersion = JavaLanguageVersion.of(11)
-	}
 
 	jvmArgs "-ea",
 		"--add-opens=java.base/java.lang=ALL-UNNAMED",
