@@ -11,3 +11,11 @@ nbproject/
 # Internal dev/crawler artifacts — do not publish
 data/
 .PROJECT_CONTEXT.md
+
+# Runtime log output
+run-output*.txt
+run-output.txt
+
+# Crawler metadata in resources (internal only)
+src/main/resources/crawl_changelog.txt
+src/main/resources/crawl_metadata.json
