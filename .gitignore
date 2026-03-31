@@ -1,0 +1,13 @@
+.gradle
+build
+.idea/
+.project
+.settings/
+.classpath
+nbactions.xml
+nb-configuration.xml
+nbproject/
+
+# Internal dev/crawler artifacts — do not publish
+data/
+.PROJECT_CONTEXT.md

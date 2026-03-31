@@ -1,0 +1,17 @@
+Strategy Codex Crawl Changelog v2.0
+Date: 2026-03-31 13:21 UTC
+============================================================
+
+SUMMARY:
+  Monsters:                118
+  Builds total:            395
+  Missing inventory:       114
+  High-risk pages audited: 9
+
+KNOWN LIMITATIONS:
+  - {{Cheap food}} parsed as placeholder name 'Cheap food'
+  - Rune pouch contents listed as 'Rune pouch' without expansion
+  - BiS gear text-only; may differ from ItemManager display names
+  - Image-only inventory setups produce extraction_warning
+
+No changes detected.
