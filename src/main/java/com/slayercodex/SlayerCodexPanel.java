@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -229,6 +230,40 @@ public class SlayerCodexPanel extends PluginPanel
 			monsterList.ensureIndexIsVisible(index);
 		}
 		return true;
+	}
+
+	public Set<Integer> getCurrentStyleRelevantItemIds()
+	{
+		if (currentMatrixRows == null || currentMatrixRows.isEmpty())
+		{
+			return Collections.emptySet();
+		}
+
+		LinkedHashSet<Integer> itemIds = new LinkedHashSet<>();
+		for (GearMatrixRow row : currentMatrixRows)
+		{
+			if (row == null)
+			{
+				continue;
+			}
+
+			if (row.wiki != null && row.wiki.getItemId() > 0)
+			{
+				itemIds.add(row.wiki.getItemId());
+			}
+
+			if (row.yourBest != null && row.yourBest.getItemId() > 0)
+			{
+				itemIds.add(row.yourBest.getItemId());
+			}
+		}
+
+		if (itemIds.isEmpty())
+		{
+			return Collections.emptySet();
+		}
+
+		return Collections.unmodifiableSet(itemIds);
 	}
 
 	public void refreshRecommendations()
