@@ -36,7 +36,7 @@ public class SlayerCodexDataStore
 				throw new IOException("Resource not found: /monster_strategies.json");
 			}
 
-			root = new JsonParser().parse(new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
+			root = JsonParser.parseReader(new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
 			monsters = root.getAsJsonObject("monsters");
 			monsterSummaries = buildSummaries(monsters);
 			taskNameToMonsterKey = buildTaskLookup(monsterSummaries);
