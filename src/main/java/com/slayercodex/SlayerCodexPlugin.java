@@ -12,16 +12,24 @@ import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
+import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.Text;
 
 @Slf4j
@@ -30,8 +38,18 @@ import net.runelite.client.util.Text;
 )
 public class SlayerCodexPlugin extends Plugin
 {
-	private static final Pattern ASSIGNMENT_PATTERN = Pattern.compile("(?:assigned to kill|hunt)\\s+(\\d+)\\s+([a-zA-Z '\\-]+)", Pattern.CASE_INSENSITIVE);
-	private static final Pattern REMAINING_PATTERN = Pattern.compile("(?:hunting|assigned to kill)\\s+([a-zA-Z '\\-]+).*?(\\d+)\\s+(?:to go|more to go|remaining)", Pattern.CASE_INSENSITIVE);
+	private static final Pattern ASSIGNMENT_PATTERN = Pattern.compile(
+		"(?:(?:now\\s+)?assigned\\s+to\\s+(?:kill|slay)|hunt|new\\s+task\\s+is\\s+to\\s+(?:kill|slay))\\s+(\\d+)\\s+([a-zA-Z '\\-]+)",
+		Pattern.CASE_INSENSITIVE);
+	private static final Pattern REMAINING_PATTERN = Pattern.compile(
+		"(?:hunting|assigned\\s+to\\s+(?:kill|slay))\\s+([a-zA-Z '\\-]+).*?(\\d+)\\s+(?:to go|more to go|remaining)",
+		Pattern.CASE_INSENSITIVE);
+	private static final Pattern TASK_ENDED_PATTERN = Pattern.compile(
+		"(?:you(?:'ve| have)\\s+completed\\s+your\\s+(?:slayer\\s+)?task"
+			+ "|task\\s+(?:has\\s+been\\s+)?cancell?ed"
+			+ "|return\\s+to\\s+a\\s+slayer\\s+master"
+			+ "|you\\s+can\\s+now\\s+earn\\s+slayer\\s+reward\\s+points)",
+		Pattern.CASE_INSENSITIVE);
 
 	@Inject
 	private ClientToolbar clientToolbar;
@@ -52,10 +70,28 @@ public class SlayerCodexPlugin extends Plugin
 	private SlayerCodexOwnershipTracker ownershipTracker;
 
 	@Inject
+	private SlayerCodexItemResolver itemResolver;
+
+	@Inject
 	private SlayerCodexRecommendationService recommendationService;
 
 	@Inject
 	private SlayerCodexConfig config;
+
+	@Inject
+	private SlayerCodexTaskState taskState;
+
+	@Inject
+	private SlayerCodexBankFilter bankFilter;
+
+	@Inject
+	private SlayerCodexItemOverlay itemOverlay;
+
+	@Inject
+	private OverlayManager overlayManager;
+
+	@Inject
+	private EventBus eventBus;
 
 	private String currentTaskName;
 	private Integer currentTaskRemaining;
@@ -66,7 +102,8 @@ public class SlayerCodexPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		panel = new SlayerCodexPanel(dataStore, itemManager, recommendationService, ownershipTracker);
+		panel = new SlayerCodexPanel(dataStore, itemManager, recommendationService, ownershipTracker, config);
+		panel.setFocusListener(this::onPanelFocusChanged);
 
 		navButton = NavigationButton.builder()
 			.tooltip("Slayer Codex")
@@ -76,6 +113,9 @@ public class SlayerCodexPlugin extends Plugin
 			.build();
 
 		clientToolbar.addNavigation(navButton);
+
+		eventBus.register(bankFilter);
+		overlayManager.add(itemOverlay);
 
 		try
 		{
@@ -110,13 +150,68 @@ public class SlayerCodexPlugin extends Plugin
 		}
 
 		String message = Text.removeTags(event.getMessage());
+		applyTaskFromText(message, "chat");
+	}
+
+	@Subscribe
+	public void onWidgetLoaded(WidgetLoaded event)
+	{
+		if (!config.autoDetectTask())
+		{
+			return;
+		}
+
+		int groupId = event.getGroupId();
+		if (groupId != InterfaceID.CHAT_LEFT && groupId != InterfaceID.CHAT_RIGHT)
+		{
+			return;
+		}
+
+		// The dialog widget fires WidgetLoaded before its text is populated by the client
+		// scripts — defer the read so we see the actual NPC line, not an empty placeholder.
+		clientThread.invokeLater(() ->
+		{
+			Widget textWidget = client.getWidget(
+				groupId == InterfaceID.CHAT_LEFT
+					? InterfaceID.ChatLeft.TEXT
+					: InterfaceID.ChatRight.TEXT);
+			if (textWidget == null)
+			{
+				return;
+			}
+
+			String raw = textWidget.getText();
+			if (raw == null || raw.isEmpty())
+			{
+				return;
+			}
+
+			// Wiki dialog text uses <br> as line breaks — flatten so the regex can span them.
+			String message = Text.removeTags(raw.replace("<br>", " "));
+			applyTaskFromText(message, "dialog");
+		});
+	}
+
+	private void applyTaskFromText(String message, String source)
+	{
 		if (message == null)
 		{
 			return;
 		}
 
+		if (TASK_ENDED_PATTERN.matcher(message).find())
+		{
+			clearCurrentTask();
+			log.debug("Slayer task ended via {}: {}", source, message);
+			return;
+		}
+
 		String lower = message.toLowerCase();
-		if (!lower.contains("slayer") && !lower.contains("to go") && !lower.contains("assigned"))
+		if (!lower.contains("slayer")
+			&& !lower.contains("to go")
+			&& !lower.contains("assigned")
+			&& !lower.contains("new task")
+			&& !lower.contains("hunting"))
 		{
 			return;
 		}
@@ -127,15 +222,40 @@ public class SlayerCodexPlugin extends Plugin
 			return;
 		}
 
+		// Same task already loaded — avoid re-firing the panel update on every dialog tick.
+		if (update.taskName != null
+			&& update.taskName.equalsIgnoreCase(currentTaskName)
+			&& java.util.Objects.equals(update.remaining, currentTaskRemaining))
+		{
+			return;
+		}
+
 		currentTaskName = update.taskName;
 		currentTaskRemaining = update.remaining;
 
 		String key = dataStore.findBestMonsterKeyForTask(currentTaskName, config.preferBossVariant());
 		panel.setCurrentTaskTarget(key);
 		boolean autoSelected = panel.selectMonsterByKey(key);
+		if (key == null)
+		{
+			// Detected the task but the bundled dataset has no strategy for it — surface the
+			// task name in the panel with a wiki link so the player still gets useful info.
+			panel.setTaskWithoutStrategy(currentTaskName);
+		}
 		panel.setCurrentTask(currentTaskName, currentTaskRemaining, autoSelected);
 
-		log.debug("Detected task via chat: {} ({}) -> {}", currentTaskName, currentTaskRemaining, key);
+		log.debug("Detected task via {}: {} ({}) -> {}", source, currentTaskName, currentTaskRemaining, key);
+	}
+
+	private void clearCurrentTask()
+	{
+		currentTaskName = null;
+		currentTaskRemaining = null;
+		if (panel != null)
+		{
+			panel.setCurrentTaskTarget(null);
+			panel.setCurrentTask(null, null, false);
+		}
 	}
 
 	@Subscribe
@@ -146,11 +266,25 @@ public class SlayerCodexPlugin extends Plugin
 		{
 			panel.refreshRecommendations();
 		}
+
+		// Item cache may have just become available — index now and re-resolve the
+		// current task's gear so the bank filter / overlay pick up fresh item IDs.
+		boolean wasIndexed = itemResolver.isIndexed();
+		itemResolver.warmUp();
+		if (!wasIndexed && itemResolver.isIndexed() && panel != null)
+		{
+			panel.refreshFocus();
+		}
 	}
 
 	@Override
 	protected void shutDown()
 	{
+		eventBus.unregister(bankFilter);
+		overlayManager.remove(itemOverlay);
+		bankFilter.shutDown();
+		taskState.clear();
+
 		if (navButton != null)
 		{
 			clientToolbar.removeNavigation(navButton);
@@ -159,6 +293,62 @@ public class SlayerCodexPlugin extends Plugin
 
 		panel = null;
 		log.info("Slayer Codex plugin stopped");
+	}
+
+	@Subscribe
+	public void onConfigChanged(ConfigChanged event)
+	{
+		if (!"slayercodex".equals(event.getGroup()))
+		{
+			return;
+		}
+
+		if (panel == null)
+		{
+			return;
+		}
+
+		// Reload current view so changes like compact rows / preferred style take effect immediately
+		panel.refreshRecommendations();
+		bankFilter.onTaskStateChanged();
+	}
+
+	@Subscribe
+	public void onGameStateChanged(GameStateChanged event)
+	{
+		GameState state = event.getGameState();
+		if (state != GameState.LOGIN_SCREEN && state != GameState.LOGGED_IN)
+		{
+			return;
+		}
+
+		clientThread.invoke(() ->
+		{
+			boolean wasIndexed = itemResolver.isIndexed();
+			itemResolver.warmUp();
+			if (!wasIndexed && itemResolver.isIndexed() && panel != null)
+			{
+				// Index just became available — re-fire focus listener so the previously-empty
+				// taskState picks up the now-resolvable item ids.
+				panel.refreshFocus();
+			}
+		});
+	}
+
+	private void onPanelFocusChanged(SlayerCodexDataStore.MonsterDetails details)
+	{
+		if (details == null)
+		{
+			taskState.clear();
+		}
+		else
+		{
+			taskState.update(
+				details.getSummary().getKey(),
+				details.getSummary().getName(),
+				recommendationService.collectAllRelevantItemIds(details));
+		}
+		bankFilter.onTaskStateChanged();
 	}
 
 	@Provides

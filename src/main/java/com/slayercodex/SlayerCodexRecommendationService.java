@@ -3,9 +3,11 @@ package com.slayercodex;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeSet;
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -66,6 +68,43 @@ public class SlayerCodexRecommendationService
 		return ownershipTracker.isBankKnown()
 			? "Your Best uses equipped, inventory and every bank item seen this session."
 			: "Your Best uses equipped and inventory items until you open the bank once this session.";
+	}
+
+	/**
+	 * Collects every resolvable item ID across every build/style/tier/slot for a monster.
+	 * Used by the bank filter and item overlay to know which items belong to a task.
+	 */
+	public Set<Integer> collectAllRelevantItemIds(SlayerCodexDataStore.MonsterDetails details)
+	{
+		if (details == null)
+		{
+			return Collections.emptySet();
+		}
+
+		LinkedHashSet<Integer> ids = new LinkedHashSet<>();
+		for (SlayerCodexDataStore.CombatStyleDetails style : details.getCombatStyles())
+		{
+			if (style == null)
+			{
+				continue;
+			}
+			for (List<SlayerCodexDataStore.GearRow> tierRows : style.getTierRows().values())
+			{
+				if (tierRows == null)
+				{
+					continue;
+				}
+				for (SlayerCodexDataStore.GearRow row : tierRows)
+				{
+					if (row == null)
+					{
+						continue;
+					}
+					ids.addAll(itemResolver.resolveItemIds(row.getItemName(), row.getAltName()));
+				}
+			}
+		}
+		return ids.isEmpty() ? Collections.emptySet() : Collections.unmodifiableSet(ids);
 	}
 
 	private RecommendationCell buildWikiCell(SlotAccumulator acc)

@@ -29,6 +29,13 @@ public interface SlayerCodexConfig extends Config
 	)
 	String recommendSection = "recommend";
 
+	@ConfigSection(
+		name = "Bank & In-game",
+		description = "Filter the bank and highlight task-relevant items in the game world",
+		position = 3
+	)
+	String bankSection = "bank";
+
 	// ── Task Detection ─────────────────────────────────────────────────────────
 
 	@ConfigItem(
@@ -58,23 +65,11 @@ public interface SlayerCodexConfig extends Config
 	// ── Display ────────────────────────────────────────────────────────────────
 
 	@ConfigItem(
-		keyName = "showSlayerXp",
-		name = "Show Slayer XP per kill",
-		description = "Display the expected Slayer XP per kill in the monster header.",
-		section = displaySection,
-		position = 0
-	)
-	default boolean showSlayerXp()
-	{
-		return true;
-	}
-
-	@ConfigItem(
 		keyName = "showTaskCountdown",
 		name = "Show task remaining count",
 		description = "Show how many kills are left when a task is detected.",
 		section = displaySection,
-		position = 1
+		position = 0
 	)
 	default boolean showTaskCountdown()
 	{
@@ -86,23 +81,11 @@ public interface SlayerCodexConfig extends Config
 		name = "Compact gear table rows",
 		description = "Reduces the row height in the gear table so more slots are visible without scrolling.",
 		section = displaySection,
-		position = 2
+		position = 1
 	)
 	default boolean compactGearTable()
 	{
 		return false;
-	}
-
-	@ConfigItem(
-		keyName = "showBossVariantBadge",
-		name = "Show boss variant badge",
-		description = "Show a badge in the monster header when a boss variant of the current task exists.",
-		section = displaySection,
-		position = 3
-	)
-	default boolean showBossVariantBadge()
-	{
-		return true;
 	}
 
 	// ── Recommendations ────────────────────────────────────────────────────────
@@ -121,12 +104,50 @@ public interface SlayerCodexConfig extends Config
 
 	@ConfigItem(
 		keyName = "highlightOwnedItems",
-		name = "Highlight owned items",
-		description = "Show a green tint on items in Your Best column if you own them.",
+		name = "Highlight owned items in panel",
+		description = "Color items in the Your Best column based on whether they are equipped, in your inventory, or in your bank.",
 		section = recommendSection,
 		position = 1
 	)
 	default boolean highlightOwnedItems()
+	{
+		return true;
+	}
+
+	// ── Bank & In-game ─────────────────────────────────────────────────────────
+
+	@ConfigItem(
+		keyName = "bankFilterEnabled",
+		name = "Show bank filter button",
+		description = "Adds a 'Slayer' toggle to the bank UI that hides items not relevant to your current task.",
+		section = bankSection,
+		position = 0
+	)
+	default boolean bankFilterEnabled()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "autoApplyBankFilter",
+		name = "Auto-filter on bank open",
+		description = "Automatically activate the bank filter when you open the bank with a task focused. Toggle off any time via the bank button.",
+		section = bankSection,
+		position = 1
+	)
+	default boolean autoApplyBankFilter()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "highlightItemsInGame",
+		name = "Highlight task items in-game",
+		description = "Outlines task-relevant items in your bank, inventory, and equipment so they're easier to spot.",
+		section = bankSection,
+		position = 2
+	)
+	default boolean highlightItemsInGame()
 	{
 		return true;
 	}

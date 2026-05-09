@@ -4,7 +4,7 @@ A RuneLite plugin that shows wiki-sourced gear setups for your current Slayer ta
 
 ## Features
 
-- **Auto-detects your Slayer task** from the chat box and opens the matching strategy page immediately
+- **Instant task detection** — the panel updates the moment a Slayer master assigns or updates your task, directly from the dialogue box; the chat gem and enchanted Slayer helmet also work as fallbacks
 - **Boss variant awareness** — automatically suggests the boss version (e.g. Hellhounds → Cerberus) when enabled
 - **Gear matrix** per combat style and slot tier (BIS → budget), pulled from bundled OSRS Wiki strategy data
 - **Your Best column** — compares each slot against your equipped items and inventory to show the best gear you actually own
@@ -14,7 +14,7 @@ A RuneLite plugin that shows wiki-sourced gear setups for your current Slayer ta
 
 ## How to use
 
-1. Get assigned a Slayer task by any master — the plugin detects it from chat automatically.
+1. Get assigned a Slayer task by any master — the plugin reads the assignment dialogue and updates instantly. No need to check your gem or helmet first.
 2. A red **Open task setup** button appears in the header. Click it to jump straight to that monster's strategy.
    - If the task is auto-matched, the button disappears — you are already there.
 3. Choose a **combat style tab** (Melee / Ranged / Magic / etc.) at the top of the detail panel.
@@ -22,7 +22,17 @@ A RuneLite plugin that shows wiki-sourced gear setups for your current Slayer ta
 5. Click any slot row marked with `*` to read the relevant strategy notes at the bottom.
 6. Use the blue **Wiki** button to open the full wiki strategy page in your browser.
 
-> **Tip:** Open your bank at least once per session. The orange banner at the top disappears once your bank contents are known, and the **Yours** column becomes fully accurate across all slots.
+### Task pill — what the colours mean
+
+The chip at the top of the panel reflects the live state of your task:
+
+| Pill | Meaning |
+|---|---|
+| **Grey · NO TASK** | No task detected. Visit a Slayer master to get one. |
+| **Green · ON TASK · N left** | Task assigned **and** the bundled dataset has a strategy for it — gear matrix loads automatically. |
+| **Orange · ON TASK · N left · NO DATA** | Task assigned but the bundled dataset doesn't ship a strategy for that monster. The task name and a working **Wiki** button are still shown so you can read up manually. |
+
+> **Tip:** Open your bank at least once per session. The orange bank banner at the top disappears once your bank contents are known, and the **Yours** column becomes fully accurate across all slots. (This is separate from the orange pill state above.)
 
 ## Configuration
 

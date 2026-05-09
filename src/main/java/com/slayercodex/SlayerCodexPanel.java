@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
@@ -66,10 +67,14 @@ public class SlayerCodexPanel extends PluginPanel
 	private final ItemManager itemManager;
 	private final SlayerCodexRecommendationService recommendationService;
 	private final SlayerCodexOwnershipTracker ownershipTracker;
+	private final SlayerCodexConfig config;
 	private final JLabel statusLabel = createMutedLabel("Search monsters and pick a setup");
-	private final JLabel taskLabel = createMutedLabel("Current task: not detected yet");
+	private final JLabel statusPillLabel = new JLabel("NO TASK");
+	private final JPanel statusPill = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+	private final JLabel taskNameLabel = new JLabel("None detected");
+	private final JLabel taskSubLabel = new JLabel("Visit a Slayer master");
 	private final JLabel taskIconLabel = new JLabel();
-	private final JButton taskActionButton = new JButton("Check Slayer Task");
+	private final JButton taskActionButton = new JButton("Open Task Setup");
 	private final JButton browserToggleButton = new JButton("Browse Strategies");
 	private final JButton browseAllButton = new JButton("Browse all monsters");
 	private final JTextField searchField = new JTextField();
@@ -100,17 +105,22 @@ public class SlayerCodexPanel extends PluginPanel
 	private boolean browserExpanded;
 	private SlayerCodexDataStore.MonsterDetails currentMonster;
 	private SlayerCodexDataStore.CombatStyleDetails currentStyle;
+	private Consumer<SlayerCodexDataStore.MonsterDetails> focusListener;
+	private String noStrategyTaskName;
+	private String noStrategyWikiUrl;
 
 	public SlayerCodexPanel(
 		SlayerCodexDataStore dataStore,
 		ItemManager itemManager,
 		SlayerCodexRecommendationService recommendationService,
-		SlayerCodexOwnershipTracker ownershipTracker)
+		SlayerCodexOwnershipTracker ownershipTracker,
+		SlayerCodexConfig config)
 	{
 		this.dataStore = dataStore;
 		this.itemManager = itemManager;
 		this.recommendationService = recommendationService;
 		this.ownershipTracker = ownershipTracker;
+		this.config = config;
 
 		setLayout(new BorderLayout(8, 8));
 		setBackground(BG_ROOT);
@@ -152,41 +162,68 @@ public class SlayerCodexPanel extends PluginPanel
 	{
 		if (taskName == null || taskName.trim().isEmpty())
 		{
-			taskLabel.setText("Current task: not detected yet");
-			taskLabel.setForeground(TEXT_MUTED);
-			taskActionButton.setVisible(true);
-			taskActionButton.setEnabled(false);
-			styleButton(taskActionButton, false, 10);
+			applyPillStyle(new Color(48, 56, 70), TEXT_MUTED, "NO TASK");
+			taskNameLabel.setText("None detected");
+			taskNameLabel.setForeground(TEXT_MUTED);
+			taskSubLabel.setText("Visit a Slayer master");
+			taskSubLabel.setForeground(TEXT_MUTED);
+			taskActionButton.setVisible(false);
 			return;
 		}
 
-		StringBuilder text = new StringBuilder("Current task: ").append(taskName);
+		// If a real strategy mapping exists, drop any leftover no-strategy state from a prior task.
+		if (currentTaskMonsterKey != null)
+		{
+			clearNoStrategyState();
+		}
+
+		StringBuilder pillText = new StringBuilder("ON TASK");
 		if (remaining != null)
 		{
-			text.append(" (").append(remaining).append(" left)");
+			pillText.append(" · ").append(remaining).append(" left");
 		}
-		taskLabel.setText(text.toString());
-		taskLabel.setForeground(GREEN_ACCENT);
+
+		boolean noStrategy = noStrategyTaskName != null
+			&& noStrategyTaskName.equalsIgnoreCase(taskName);
+
+		if (noStrategy)
+		{
+			applyPillStyle(new Color(80, 50, 20), ORANGE_ACCENT, pillText + " · NO DATA");
+			taskNameLabel.setText(taskName);
+			taskNameLabel.setForeground(ORANGE_ACCENT);
+			taskSubLabel.setText("No bundled strategy — click Wiki below");
+			taskSubLabel.setForeground(TEXT_MUTED);
+			taskActionButton.setVisible(false);
+			return;
+		}
+
+		applyPillStyle(new Color(28, 70, 40), GREEN_ACCENT, pillText.toString());
+		taskNameLabel.setText(taskName);
+		taskNameLabel.setForeground(TEXT_MAIN);
+		taskSubLabel.setText(autoSelected ? "Strategy loaded below" : "Tap to load strategy");
+		taskSubLabel.setForeground(TEXT_MUTED);
 
 		if (autoSelected)
 		{
-			// Monster already shown — button not needed
 			taskActionButton.setVisible(false);
 		}
 		else if (currentTaskMonsterKey != null)
 		{
-			// Task found but user hasn't navigated yet — highlight red
 			taskActionButton.setEnabled(true);
 			taskActionButton.setVisible(true);
-			styleButtonRed(taskActionButton, 10);
+			styleButtonRed(taskActionButton, 11);
 		}
 		else
 		{
-			// Task detected but no monster mapping found
-			taskActionButton.setEnabled(false);
-			taskActionButton.setVisible(true);
-			styleButton(taskActionButton, false, 10);
+			taskActionButton.setVisible(false);
 		}
+	}
+
+	private void applyPillStyle(Color background, Color foreground, String text)
+	{
+		statusPill.setBackground(background);
+		statusPillLabel.setText(text);
+		statusPillLabel.setForeground(foreground);
 	}
 
 	public void setCurrentTaskTarget(String monsterKey)
@@ -230,6 +267,101 @@ public class SlayerCodexPanel extends PluginPanel
 			monsterList.ensureIndexIsVisible(index);
 		}
 		return true;
+	}
+
+	/**
+	 * Shown when chat detected a Slayer task but the bundled dataset has no strategy
+	 * for that monster (e.g. wiki page lacks the Recommended-equipment template).
+	 * Surfaces the task name + a clickable link to the OSRS Wiki Slayer-task page.
+	 */
+	public void setTaskWithoutStrategy(String taskName)
+	{
+		if (taskName == null || taskName.trim().isEmpty())
+		{
+			clearNoStrategyState();
+			return;
+		}
+
+		noStrategyTaskName = taskName;
+		noStrategyWikiUrl = WIKI_BASE_URL + monsterArticleSlug(taskName);
+
+		currentMonster = null;
+		currentStyle = null;
+		currentMatrixRows = Collections.emptyList();
+		notifyFocusListener();
+
+		monsterList.clearSelection();
+		selectedMonsterLabel.setText(taskName);
+		detailsMetaLabel.setText("No bundled strategy — view on the OSRS Wiki");
+		styleButtonPanel.removeAll();
+		styleButtons.clear();
+		styleGroup.clearSelection();
+		styleButtonPanel.revalidate();
+		styleButtonPanel.repaint();
+		variantTogglePanel.setVisible(false);
+		variantTargetKey = null;
+		gearTableModel.setRows(Collections.emptyList());
+		notesArea.setText(
+			"No strategy data is bundled for this task.\n\n"
+				+ "Click the Wiki button above to open the OSRS Wiki page for "
+				+ taskName + " and read recommended gear & methods there.");
+		notesArea.setCaretPosition(0);
+		wikiButton.setEnabled(true);
+	}
+
+	private void clearNoStrategyState()
+	{
+		noStrategyTaskName = null;
+		noStrategyWikiUrl = null;
+	}
+
+	/**
+	 * Convert a Slayer task name (often plural, mixed case) into the OSRS Wiki monster
+	 * article slug. The wiki uses singular forms with only the first letter capitalised
+	 * (e.g. "Black Demons" -> "Black_demon", "Aberrant Spectres" -> "Aberrant_spectre").
+	 * Words ending in "ss" (e.g. "Cyclops") keep their final 's'.
+	 */
+	private static String monsterArticleSlug(String taskName)
+	{
+		if (taskName == null)
+		{
+			return "";
+		}
+		String trimmed = taskName.trim();
+		if (trimmed.isEmpty())
+		{
+			return "";
+		}
+
+		if (trimmed.length() > 1
+			&& Character.toLowerCase(trimmed.charAt(trimmed.length() - 1)) == 's'
+			&& Character.toLowerCase(trimmed.charAt(trimmed.length() - 2)) != 's')
+		{
+			trimmed = trimmed.substring(0, trimmed.length() - 1);
+		}
+
+		StringBuilder slug = new StringBuilder(trimmed.length());
+		slug.append(Character.toUpperCase(trimmed.charAt(0)));
+		for (int i = 1; i < trimmed.length(); i++)
+		{
+			char c = trimmed.charAt(i);
+			slug.append(c == ' ' ? '_' : Character.toLowerCase(c));
+		}
+		return slug.toString();
+	}
+
+	public void setFocusListener(Consumer<SlayerCodexDataStore.MonsterDetails> listener)
+	{
+		this.focusListener = listener;
+		if (listener != null)
+		{
+			listener.accept(currentMonster);
+		}
+	}
+
+	public void refreshFocus()
+	{
+		notifyFocusListener();
 	}
 
 	public Set<Integer> getCurrentStyleRelevantItemIds()
@@ -286,20 +418,63 @@ public class SlayerCodexPanel extends PluginPanel
 
 	private Component buildHeader()
 	{
-		JPanel header = new JPanel();
-		header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
+		// BorderLayout makes the card stretch the panel's full width — BoxLayout.Y_AXIS
+		// shrinks every row to its preferred width, which truncates the task name.
+		JPanel header = new JPanel(new BorderLayout(0, 4));
 		header.setOpaque(false);
 
 		JPanel taskCard = createCardPanel();
-		taskCard.setLayout(new BorderLayout(8, 0));
-		taskCard.add(taskIconLabel, BorderLayout.WEST);
-		taskCard.add(taskLabel, BorderLayout.CENTER);
-		styleButton(taskActionButton, false, 10);
-		taskActionButton.setPreferredSize(new Dimension(108, 30));
-		taskActionButton.setToolTipText("Check your current Slayer task and open its recommended gear setup");
-		taskCard.add(taskActionButton, BorderLayout.EAST);
+		taskCard.setLayout(new BorderLayout(0, 8));
 
-		// Bank hint banner — red until bank is opened this session
+		// Status pill — left-aligned chip at the top
+		statusPill.setOpaque(true);
+		statusPill.setBackground(new Color(48, 56, 70));
+		statusPill.setBorder(BorderFactory.createEmptyBorder(4, 10, 4, 10));
+		statusPillLabel.setFont(new Font("SansSerif", Font.BOLD, 11));
+		statusPillLabel.setForeground(TEXT_MUTED);
+		statusPill.add(statusPillLabel);
+
+		JPanel pillRow = new JPanel(new BorderLayout());
+		pillRow.setOpaque(false);
+		pillRow.add(statusPill, BorderLayout.WEST);
+		taskCard.add(pillRow, BorderLayout.NORTH);
+
+		// Icon + text stack — CENTER stretches text area to fill remaining width
+		JPanel iconNameRow = new JPanel(new BorderLayout(10, 0));
+		iconNameRow.setOpaque(false);
+
+		JPanel iconPlate = new JPanel(new BorderLayout());
+		iconPlate.setBackground(new Color(48, 56, 70));
+		iconPlate.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createLineBorder(new Color(78, 90, 110), 1),
+			BorderFactory.createEmptyBorder(6, 4, 0, 4)
+		));
+		iconPlate.setPreferredSize(new Dimension(44, 44));
+		taskIconLabel.setHorizontalAlignment(JLabel.CENTER);
+		taskIconLabel.setVerticalAlignment(JLabel.CENTER);
+		iconPlate.add(taskIconLabel, BorderLayout.CENTER);
+		iconNameRow.add(iconPlate, BorderLayout.WEST);
+
+		JPanel textStack = new JPanel(new GridLayout(2, 1, 0, 2));
+		textStack.setOpaque(false);
+		taskNameLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
+		taskNameLabel.setForeground(TEXT_MUTED);
+		taskNameLabel.setHorizontalAlignment(JLabel.LEFT);
+		taskSubLabel.setFont(new Font("SansSerif", Font.PLAIN, 11));
+		taskSubLabel.setForeground(TEXT_MUTED);
+		taskSubLabel.setHorizontalAlignment(JLabel.LEFT);
+		textStack.add(taskNameLabel);
+		textStack.add(taskSubLabel);
+		iconNameRow.add(textStack, BorderLayout.CENTER);
+
+		taskCard.add(iconNameRow, BorderLayout.CENTER);
+
+		// Action button — only visible when there's a known task to open
+		styleButton(taskActionButton, false, 11);
+		taskActionButton.setToolTipText("Jump to the recommended gear setup for your current task");
+		taskCard.add(taskActionButton, BorderLayout.SOUTH);
+
+		// Bank hint banner — orange until bank is opened this session
 		bankHintLabel.setForeground(ORANGE_ACCENT);
 		bankHintLabel.setFont(new Font("SansSerif", Font.BOLD, 10));
 		bankHintPanel.setBackground(new Color(60, 30, 10));
@@ -310,9 +485,8 @@ public class SlayerCodexPanel extends PluginPanel
 		bankHintLabel.setToolTipText("Open your bank at least once so the plugin can compare your owned gear against recommended setups");
 		bankHintPanel.add(bankHintLabel, BorderLayout.CENTER);
 
-		header.add(taskCard);
-		header.add(Box.createVerticalStrut(4));
-		header.add(bankHintPanel);
+		header.add(taskCard, BorderLayout.NORTH);
+		header.add(bankHintPanel, BorderLayout.SOUTH);
 		return header;
 	}
 
@@ -336,6 +510,8 @@ public class SlayerCodexPanel extends PluginPanel
 		monsterList.setCellRenderer(new MonsterSummaryRenderer());
 		monsterList.setFont(new Font("SansSerif", Font.PLAIN, 13));
 		monsterList.setBackground(BG_CARD_ALT);
+		monsterList.setFixedCellHeight(40);
+		monsterList.setVisibleRowCount(10);
 
 		browserPanel.setOpaque(false);
 		browserPanel.add(searchField, BorderLayout.NORTH);
@@ -440,7 +616,7 @@ public class SlayerCodexPanel extends PluginPanel
 		gearTable.setForeground(TEXT_MAIN);
 		gearTable.setFont(new Font("SansSerif", Font.PLAIN, 11));
 		gearTable.setGridColor(BORDER);
-		gearTable.setRowHeight(36);
+		gearTable.setRowHeight(config.compactGearTable() ? 24 : 36);
 		gearTable.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
 		gearTable.getTableHeader().setBackground(BG_CARD_ALT);
 		gearTable.getTableHeader().setForeground(TEXT_MAIN);
@@ -596,6 +772,9 @@ public class SlayerCodexPanel extends PluginPanel
 			return;
 		}
 
+		// Manual selection takes precedence over a no-strategy task placeholder.
+		clearNoStrategyState();
+
 		SlayerCodexDataStore.MonsterDetails details = dataStore.getMonsterDetails(summary.getKey());
 		if (details == null)
 		{
@@ -604,6 +783,7 @@ public class SlayerCodexPanel extends PluginPanel
 		}
 
 		currentMonster = details;
+		notifyFocusListener();
 		selectedMonsterLabel.setText(summary.getName());
 		wikiButton.setEnabled(summary.getWikiPage() != null && !summary.getWikiPage().trim().isEmpty());
 
@@ -656,7 +836,8 @@ public class SlayerCodexPanel extends PluginPanel
 		rebuildStyleButtons(visibleStyles);
 		if (!styleButtons.isEmpty())
 		{
-			styleButtons.get(0).doClick();
+			int preferredIndex = pickPreferredStyleIndex(visibleStyles, config.defaultCombatStyle());
+			styleButtons.get(preferredIndex).doClick();
 		}
 		else
 		{
@@ -670,6 +851,27 @@ public class SlayerCodexPanel extends PluginPanel
 				notesArea.setText("No usable gear slots found in crawler data for this monster yet.");
 			}
 		}
+	}
+
+	private int pickPreferredStyleIndex(
+		List<SlayerCodexDataStore.CombatStyleDetails> styles,
+		SlayerCodexConfig.StylePreference preference)
+	{
+		if (preference == null || preference == SlayerCodexConfig.StylePreference.AUTO)
+		{
+			return 0;
+		}
+
+		String needle = preference.name().toLowerCase(Locale.ENGLISH);
+		for (int i = 0; i < styles.size(); i++)
+		{
+			String styleName = styles.get(i).getName();
+			if (styleName != null && styleName.toLowerCase(Locale.ENGLISH).contains(needle))
+			{
+				return i;
+			}
+		}
+		return 0;
 	}
 
 	private List<SlayerCodexDataStore.CombatStyleDetails> getStylesWithUsableRows(List<SlayerCodexDataStore.CombatStyleDetails> styles)
@@ -921,6 +1123,10 @@ public class SlayerCodexPanel extends PluginPanel
 	{
 		if (currentMonster == null)
 		{
+			if (noStrategyWikiUrl != null)
+			{
+				LinkBrowser.browse(noStrategyWikiUrl);
+			}
 			return;
 		}
 
@@ -936,9 +1142,18 @@ public class SlayerCodexPanel extends PluginPanel
 		LinkBrowser.browse(url);
 	}
 
+	private void notifyFocusListener()
+	{
+		if (focusListener != null)
+		{
+			focusListener.accept(currentMonster);
+		}
+	}
+
 	private void clearDetails(String message)
 	{
 		currentMonster = null;
+		notifyFocusListener();
 		currentStyle = null;
 		currentMatrixRows = Collections.emptyList();
 		selectedMonsterLabel.setText("Select a monster");
@@ -961,7 +1176,7 @@ public class SlayerCodexPanel extends PluginPanel
 	{
 		wikiButton.setEnabled(false);
 		taskActionButton.setEnabled(false);
-		taskActionButton.setVisible(true);
+		taskActionButton.setVisible(false);
 		bankHintPanel.setVisible(true);
 		notesArea.setText("Select a task setup or a monster build. Slots marked with * contain notes.");
 	}
@@ -1029,10 +1244,18 @@ public class SlayerCodexPanel extends PluginPanel
 
 	private final class MonsterSummaryRenderer extends JLabel implements ListCellRenderer<SlayerCodexDataStore.MonsterSummary>
 	{
+		private final Color rowEven = BG_CARD_ALT;
+		private final Color rowOdd = new Color(35, 41, 53);
+		private final Color rowSelected = new Color(38, 70, 110);
+		private final Color rowSeparator = new Color(44, 52, 66);
+
 		private MonsterSummaryRenderer()
 		{
 			setOpaque(true);
-			setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+			setBorder(BorderFactory.createCompoundBorder(
+				BorderFactory.createMatteBorder(0, 0, 1, 0, rowSeparator),
+				BorderFactory.createEmptyBorder(6, 10, 6, 10)
+			));
 		}
 
 		@Override
@@ -1058,18 +1281,20 @@ public class SlayerCodexPanel extends PluginPanel
 				{
 					parts.add("Combat " + value.getCombatLevel());
 				}
-				String suffix = parts.isEmpty() ? "" : "<br/><span style='color:#9CA7B7; font-size:10px;'>" + String.join(" | ", parts) + "</span>";
-				setText("<html><div style='font-size:13px;'>" + value.getName() + suffix + "</div></html>");
+				String suffix = parts.isEmpty()
+					? ""
+					: "<br/><span style='color:#9CA7B7; font-size:10px;'>" + String.join(" · ", parts) + "</span>";
+				setText("<html><div style='font-size:13px; color:#E1E8F0;'><b>" + value.getName() + "</b>" + suffix + "</div></html>");
 			}
 
 			if (isSelected)
 			{
-				setBackground(new Color(32, 57, 88));
+				setBackground(rowSelected);
 				setForeground(TEXT_MAIN);
 			}
 			else
 			{
-				setBackground(BG_CARD_ALT);
+				setBackground(index % 2 == 0 ? rowEven : rowOdd);
 				setForeground(TEXT_MAIN);
 			}
 
@@ -1132,19 +1357,20 @@ public class SlayerCodexPanel extends PluginPanel
 				{
 					toolTip = toolTip + " - this slot has extra notes below";
 				}
+				boolean tintOwnership = config.highlightOwnedItems();
 				if (cell.isEquipped())
 				{
-					setForeground(new Color(120, 223, 145));
+					setForeground(tintOwnership ? new Color(120, 223, 145) : TEXT_MAIN);
 					toolTip = toolTip + " - equipped now";
 				}
 				else if (cell.isBanked())
 				{
-					setForeground(new Color(132, 192, 255));
+					setForeground(tintOwnership ? new Color(132, 192, 255) : TEXT_MAIN);
 					toolTip = toolTip + " - found in bank";
 				}
 				else if (cell.isOwned())
 				{
-					setForeground(new Color(205, 232, 255));
+					setForeground(tintOwnership ? new Color(205, 232, 255) : TEXT_MAIN);
 					toolTip = toolTip + " - found in inventory";
 				}
 				else if (cell.isUnavailableFallback())

@@ -46,6 +46,21 @@ public class SlayerCodexItemResolver
 		return ids.isEmpty() ? -1 : ids.get(0);
 	}
 
+	public synchronized boolean isIndexed()
+	{
+		return indexed;
+	}
+
+	/**
+	 * Forces a fresh attempt to build the name → item-id index. Safe to call multiple times;
+	 * skips the work if the index was already built successfully. If the item cache is not
+	 * yet loaded, leaves {@code indexed} false so a future call can retry.
+	 */
+	public synchronized void warmUp()
+	{
+		ensureIndex();
+	}
+
 	private void ensureIndex()
 	{
 		if (indexed)
@@ -53,8 +68,15 @@ public class SlayerCodexItemResolver
 			return;
 		}
 
+		int itemCount = client.getItemCount();
+		if (itemCount <= 0)
+		{
+			// Item cache not yet loaded (e.g. pre-login screen). Try again on the next call.
+			return;
+		}
+
 		Map<String, LinkedHashSet<Integer>> resolved = new LinkedHashMap<>();
-		for (int itemId = 0; itemId < client.getItemCount(); itemId++)
+		for (int itemId = 0; itemId < itemCount; itemId++)
 		{
 			int canonicalId = itemManager.canonicalize(itemId);
 			ItemComposition item = itemManager.getItemComposition(canonicalId);
@@ -65,6 +87,13 @@ public class SlayerCodexItemResolver
 
 			registerName(resolved, item.getName(), canonicalId);
 			registerName(resolved, item.getMembersName(), canonicalId);
+		}
+
+		if (resolved.isEmpty())
+		{
+			// Nothing got registered (item compositions all returned null — likely wrong thread).
+			// Don't mark indexed; let a later call try again.
+			return;
 		}
 
 		Map<String, List<Integer>> immutable = new LinkedHashMap<>();
