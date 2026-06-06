@@ -5,7 +5,6 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import javax.inject.Inject;
 import javax.inject.Singleton;
-import net.runelite.api.Client;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.gameval.InventoryID;
@@ -14,7 +13,6 @@ import net.runelite.client.game.ItemManager;
 @Singleton
 public class SlayerCodexOwnershipTracker
 {
-	private final Client client;
 	private final ItemManager itemManager;
 
 	private Map<Integer, Integer> inventoryCounts = Collections.emptyMap();
@@ -23,17 +21,9 @@ public class SlayerCodexOwnershipTracker
 	private boolean bankKnown;
 
 	@Inject
-	public SlayerCodexOwnershipTracker(Client client, ItemManager itemManager)
+	public SlayerCodexOwnershipTracker(ItemManager itemManager)
 	{
-		this.client = client;
 		this.itemManager = itemManager;
-	}
-
-	public void initializeFromClient()
-	{
-		capture(InventoryID.INV, client.getItemContainer(InventoryID.INV));
-		capture(InventoryID.WORN, client.getItemContainer(InventoryID.WORN));
-		capture(InventoryID.BANK, client.getItemContainer(InventoryID.BANK));
 	}
 
 	public void capture(int containerId, ItemContainer container)
@@ -69,11 +59,6 @@ public class SlayerCodexOwnershipTracker
 	public boolean isInBank(int itemId)
 	{
 		return bankCounts.getOrDefault(itemId, 0) > 0;
-	}
-
-	public boolean isInInventory(int itemId)
-	{
-		return inventoryCounts.getOrDefault(itemId, 0) > 0;
 	}
 
 	public boolean isBankKnown()

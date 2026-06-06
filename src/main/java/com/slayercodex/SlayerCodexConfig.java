@@ -30,8 +30,8 @@ public interface SlayerCodexConfig extends Config
 	String recommendSection = "recommend";
 
 	@ConfigSection(
-		name = "Bank & In-game",
-		description = "Filter the bank and highlight task-relevant items in the game world",
+		name = "Bank",
+		description = "Filter your bank to show only items relevant to your current Slayer task",
 		position = 3
 	)
 	String bankSection = "bank";
@@ -138,18 +138,6 @@ public interface SlayerCodexConfig extends Config
 	default boolean autoApplyBankFilter()
 	{
 		return false;
-	}
-
-	@ConfigItem(
-		keyName = "highlightItemsInGame",
-		name = "Highlight task items in-game",
-		description = "Outlines task-relevant items in your bank, inventory, and equipment so they're easier to spot.",
-		section = bankSection,
-		position = 2
-	)
-	default boolean highlightItemsInGame()
-	{
-		return true;
 	}
 
 	enum StylePreference

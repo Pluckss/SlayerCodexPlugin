@@ -15,7 +15,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.Consumer;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -364,38 +363,13 @@ public class SlayerCodexPanel extends PluginPanel
 		notifyFocusListener();
 	}
 
-	public Set<Integer> getCurrentStyleRelevantItemIds()
+	/**
+	 * Re-applies display-only config (row height) so changes like "Compact gear table rows"
+	 * take effect immediately without a client restart.
+	 */
+	public void applyDisplaySettings()
 	{
-		if (currentMatrixRows == null || currentMatrixRows.isEmpty())
-		{
-			return Collections.emptySet();
-		}
-
-		LinkedHashSet<Integer> itemIds = new LinkedHashSet<>();
-		for (GearMatrixRow row : currentMatrixRows)
-		{
-			if (row == null)
-			{
-				continue;
-			}
-
-			if (row.wiki != null && row.wiki.getItemId() > 0)
-			{
-				itemIds.add(row.wiki.getItemId());
-			}
-
-			if (row.yourBest != null && row.yourBest.getItemId() > 0)
-			{
-				itemIds.add(row.yourBest.getItemId());
-			}
-		}
-
-		if (itemIds.isEmpty())
-		{
-			return Collections.emptySet();
-		}
-
-		return Collections.unmodifiableSet(itemIds);
+		gearTable.setRowHeight(config.compactGearTable() ? 24 : 36);
 	}
 
 	public void refreshRecommendations()

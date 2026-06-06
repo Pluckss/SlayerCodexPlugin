@@ -9,6 +9,7 @@ import java.awt.image.BufferedImage;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.inject.Inject;
+import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
@@ -29,7 +30,6 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
-import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.Text;
 
 @Slf4j
@@ -85,12 +85,6 @@ public class SlayerCodexPlugin extends Plugin
 	private SlayerCodexBankFilter bankFilter;
 
 	@Inject
-	private SlayerCodexItemOverlay itemOverlay;
-
-	@Inject
-	private OverlayManager overlayManager;
-
-	@Inject
 	private EventBus eventBus;
 
 	private String currentTaskName;
@@ -115,18 +109,21 @@ public class SlayerCodexPlugin extends Plugin
 		clientToolbar.addNavigation(navButton);
 
 		eventBus.register(bankFilter);
-		overlayManager.add(itemOverlay);
 
 		try
 		{
 			loadBundledData();
-			panel.refreshRecommendations();
-			panel.setCurrentTask(currentTaskName, currentTaskRemaining, false);
+			updateUi(() ->
+			{
+				panel.refreshRecommendations();
+				panel.setCurrentTask(currentTaskName, currentTaskRemaining, false);
+			});
 		}
 		catch (Exception ex)
 		{
 			log.error("Slayer Codex failed to initialize fully", ex);
-			panel.setErrorStatus(ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
+			final String message = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
+			updateUi(() -> panel.setErrorStatus(message));
 		}
 
 		log.info("Slayer Codex plugin started");
@@ -233,16 +230,21 @@ public class SlayerCodexPlugin extends Plugin
 		currentTaskName = update.taskName;
 		currentTaskRemaining = update.remaining;
 
-		String key = dataStore.findBestMonsterKeyForTask(currentTaskName, config.preferBossVariant());
-		panel.setCurrentTaskTarget(key);
-		boolean autoSelected = panel.selectMonsterByKey(key);
-		if (key == null)
+		final String key = dataStore.findBestMonsterKeyForTask(currentTaskName, config.preferBossVariant());
+		final String taskName = currentTaskName;
+		final Integer remaining = currentTaskRemaining;
+		updateUi(() ->
 		{
-			// Detected the task but the bundled dataset has no strategy for it — surface the
-			// task name in the panel with a wiki link so the player still gets useful info.
-			panel.setTaskWithoutStrategy(currentTaskName);
-		}
-		panel.setCurrentTask(currentTaskName, currentTaskRemaining, autoSelected);
+			panel.setCurrentTaskTarget(key);
+			boolean autoSelected = panel.selectMonsterByKey(key);
+			if (key == null)
+			{
+				// Detected the task but the bundled dataset has no strategy for it — surface the
+				// task name in the panel with a wiki link so the player still gets useful info.
+				panel.setTaskWithoutStrategy(taskName);
+			}
+			panel.setCurrentTask(taskName, remaining, autoSelected);
+		});
 
 		log.debug("Detected task via {}: {} ({}) -> {}", source, currentTaskName, currentTaskRemaining, key);
 	}
@@ -251,37 +253,53 @@ public class SlayerCodexPlugin extends Plugin
 	{
 		currentTaskName = null;
 		currentTaskRemaining = null;
-		if (panel != null)
+		updateUi(() ->
 		{
 			panel.setCurrentTaskTarget(null);
 			panel.setCurrentTask(null, null, false);
-		}
+		});
+	}
+
+	/**
+	 * Runs a panel update on the Swing EDT. Plugin event handlers fire on the client thread,
+	 * so any Swing mutation they trigger must be marshalled onto the EDT. Skips the action if
+	 * the panel has been torn down (shutDown sets it null).
+	 */
+	private void updateUi(Runnable action)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (panel != null)
+			{
+				action.run();
+			}
+		});
 	}
 
 	@Subscribe
 	public void onItemContainerChanged(ItemContainerChanged event)
 	{
 		ownershipTracker.capture(event.getContainerId(), event.getItemContainer());
-		if (panel != null)
-		{
-			panel.refreshRecommendations();
-		}
 
 		// Item cache may have just become available — index now and re-resolve the
-		// current task's gear so the bank filter / overlay pick up fresh item IDs.
+		// current task's gear so the bank filter picks up fresh item IDs.
 		boolean wasIndexed = itemResolver.isIndexed();
 		itemResolver.warmUp();
-		if (!wasIndexed && itemResolver.isIndexed() && panel != null)
+		boolean justIndexed = !wasIndexed && itemResolver.isIndexed();
+		updateUi(() ->
 		{
-			panel.refreshFocus();
-		}
+			panel.refreshRecommendations();
+			if (justIndexed)
+			{
+				panel.refreshFocus();
+			}
+		});
 	}
 
 	@Override
 	protected void shutDown()
 	{
 		eventBus.unregister(bankFilter);
-		overlayManager.remove(itemOverlay);
 		bankFilter.shutDown();
 		taskState.clear();
 
@@ -303,13 +321,12 @@ public class SlayerCodexPlugin extends Plugin
 			return;
 		}
 
-		if (panel == null)
-		{
-			return;
-		}
-
 		// Reload current view so changes like compact rows / preferred style take effect immediately
-		panel.refreshRecommendations();
+		updateUi(() ->
+		{
+			panel.applyDisplaySettings();
+			panel.refreshRecommendations();
+		});
 		bankFilter.onTaskStateChanged();
 	}
 
@@ -326,11 +343,11 @@ public class SlayerCodexPlugin extends Plugin
 		{
 			boolean wasIndexed = itemResolver.isIndexed();
 			itemResolver.warmUp();
-			if (!wasIndexed && itemResolver.isIndexed() && panel != null)
+			if (!wasIndexed && itemResolver.isIndexed())
 			{
 				// Index just became available — re-fire focus listener so the previously-empty
 				// taskState picks up the now-resolvable item ids.
-				panel.refreshFocus();
+				updateUi(() -> panel.refreshFocus());
 			}
 		});
 	}
@@ -362,13 +379,17 @@ public class SlayerCodexPlugin extends Plugin
 		try
 		{
 			dataStore.load();
-			panel.initializeFromStore();
-			panel.setDataStatus(dataStore.getMonsterCount(), dataStore.getCrawlDate());
+			updateUi(() ->
+			{
+				panel.initializeFromStore();
+				panel.setDataStatus(dataStore.getMonsterCount(), dataStore.getCrawlDate());
+			});
 		}
 		catch (Exception ex)
 		{
 			log.error("Could not load bundled strategy JSON", ex);
-			panel.setErrorStatus(ex.getMessage());
+			final String message = ex.getMessage();
+			updateUi(() -> panel.setErrorStatus(message));
 		}
 	}
 

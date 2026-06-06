@@ -30,11 +30,6 @@ public class SlayerCodexTaskState
 		this.relevantItemIds = Collections.emptySet();
 	}
 
-	public String getMonsterKey()
-	{
-		return monsterKey;
-	}
-
 	public String getMonsterName()
 	{
 		return monsterName;
@@ -48,11 +43,6 @@ public class SlayerCodexTaskState
 	public boolean hasFocus()
 	{
 		return monsterKey != null;
-	}
-
-	public boolean hasResolvedItems()
-	{
-		return !relevantItemIds.isEmpty();
 	}
 
 	public boolean isRelevant(int itemId)
