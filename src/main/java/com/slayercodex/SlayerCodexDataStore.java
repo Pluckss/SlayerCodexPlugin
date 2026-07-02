@@ -16,32 +16,70 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.zip.GZIPInputStream;
 import javax.inject.Singleton;
 
 @Singleton
 public class SlayerCodexDataStore
 {
-	private JsonObject root;
-	private JsonObject monsters;
 	private List<MonsterSummary> monsterSummaries = Collections.emptyList();
 	private Map<String, String> taskNameToMonsterKey = Collections.emptyMap();
 	private Map<String, String> baseTaskToBossKey = Collections.emptyMap();
+	// Fully parsed at load so the multi-megabyte Gson DOM can be garbage collected
+	// instead of living in the client's heap for the whole session.
+	private Map<String, MonsterDetails> detailsByKey = Collections.emptyMap();
+	// Pre-normalized (normalized, singular, key) rows for the fuzzy task-name fallback.
+	private List<String[]> normalizedNameIndex = Collections.emptyList();
+	private String crawlDate = "unknown";
 
 	public void load() throws IOException
 	{
-		try (InputStream in = SlayerCodexDataStore.class.getResourceAsStream("/monster_strategies.json"))
+		JsonObject root;
+		try (InputStream in = SlayerCodexDataStore.class.getResourceAsStream("/monster_strategies.json.gz"))
 		{
 			if (in == null)
 			{
-				throw new IOException("Resource not found: /monster_strategies.json");
+				throw new IOException("Resource not found: /monster_strategies.json.gz");
 			}
 
-			root = new JsonParser().parse(new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
-			monsters = root.getAsJsonObject("monsters");
-			monsterSummaries = buildSummaries(monsters);
-			taskNameToMonsterKey = buildTaskLookup(monsterSummaries);
-			baseTaskToBossKey = buildBossLookup(root);
+			// RuneLite bundles a pre-2.8.6 Gson — the non-deprecated static
+			// JsonParser.parseReader does not exist there.
+			root = new JsonParser()
+				.parse(new InputStreamReader(new GZIPInputStream(in), StandardCharsets.UTF_8))
+				.getAsJsonObject();
 		}
+
+		JsonObject monsters = root.getAsJsonObject("monsters");
+		monsterSummaries = buildSummaries(monsters);
+		taskNameToMonsterKey = buildTaskLookup(monsterSummaries);
+		baseTaskToBossKey = buildBossLookup(root);
+		crawlDate = readCrawlDate(root);
+
+		Map<String, MonsterDetails> details = new LinkedHashMap<>();
+		if (monsters != null)
+		{
+			for (Map.Entry<String, JsonElement> entry : monsters.entrySet())
+			{
+				if (!entry.getValue().isJsonObject())
+				{
+					continue;
+				}
+				MonsterDetails parsed = parseMonsterDetails(entry.getKey(), entry.getValue().getAsJsonObject());
+				if (parsed != null)
+				{
+					details.put(entry.getKey(), parsed);
+				}
+			}
+		}
+		detailsByKey = Collections.unmodifiableMap(details);
+
+		List<String[]> nameIndex = new ArrayList<>(monsterSummaries.size());
+		for (MonsterSummary summary : monsterSummaries)
+		{
+			String norm = normalize(summary.getName());
+			nameIndex.add(new String[] {norm, toSingular(norm), summary.getKey()});
+		}
+		normalizedNameIndex = nameIndex;
 	}
 
 	public int getMonsterCount()
@@ -51,18 +89,14 @@ public class SlayerCodexDataStore
 
 	public String getCrawlDate()
 	{
-		if (root == null)
-		{
-			return "unknown";
-		}
+		return crawlDate;
+	}
 
-		JsonObject meta = root.getAsJsonObject("_meta");
-		if (meta == null || !meta.has("crawl_date"))
-		{
-			return "unknown";
-		}
-
-		return meta.get("crawl_date").getAsString();
+	private static String readCrawlDate(JsonObject root)
+	{
+		JsonObject meta = getObject(root, "_meta");
+		String date = getString(meta, "crawl_date");
+		return date == null ? "unknown" : date;
 	}
 
 	public List<MonsterSummary> getMonsterSummaries()
@@ -81,7 +115,7 @@ public class SlayerCodexDataStore
 			return null;
 		}
 		String bossKey = baseTaskToBossKey.get(baseKey);
-		if (bossKey != null && monsters != null && monsters.has(bossKey))
+		if (bossKey != null && detailsByKey.containsKey(bossKey))
 		{
 			return bossKey;
 		}
@@ -90,12 +124,11 @@ public class SlayerCodexDataStore
 
 	public MonsterDetails getMonsterDetails(String key)
 	{
-		if (monsters == null || key == null || !monsters.has(key))
-		{
-			return null;
-		}
+		return key == null ? null : detailsByKey.get(key);
+	}
 
-		JsonObject monster = monsters.getAsJsonObject(key);
+	private MonsterDetails parseMonsterDetails(String key, JsonObject monster)
+	{
 		MonsterSummary summary = createSummary(key, monster);
 		JsonObject meta = getObject(monster, "meta");
 
@@ -390,17 +423,17 @@ public class SlayerCodexDataStore
 
 		if (key == null)
 		{
-			for (MonsterSummary summary : monsterSummaries)
+			for (String[] entry : normalizedNameIndex)
 			{
-				String summaryNorm = normalize(summary.getName());
-				String summarySingular = toSingular(summaryNorm);
+				String summaryNorm = entry[0];
+				String summarySingular = entry[1];
 				if (summaryNorm.contains(normalized)
 					|| summaryNorm.contains(singularNormalized)
 					|| summarySingular.contains(singularNormalized)
 					|| normalized.contains(summaryNorm)
 					|| singularNormalized.contains(summarySingular))
 				{
-					key = summary.getKey();
+					key = entry[2];
 					break;
 				}
 			}
@@ -414,7 +447,7 @@ public class SlayerCodexDataStore
 		if (preferBossVariant)
 		{
 			String bossKey = baseTaskToBossKey.get(key);
-			if (bossKey != null && monsters != null && monsters.has(bossKey))
+			if (bossKey != null && detailsByKey.containsKey(bossKey))
 			{
 				return bossKey;
 			}

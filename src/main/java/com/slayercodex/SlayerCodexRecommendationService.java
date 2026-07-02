@@ -15,6 +15,8 @@ import javax.inject.Singleton;
 @Singleton
 public class SlayerCodexRecommendationService
 {
+	private static final Map<String, Integer> SLOT_ORDER = buildSlotOrder();
+
 	private final SlayerCodexItemResolver itemResolver;
 	private final SlayerCodexOwnershipTracker ownershipTracker;
 
@@ -176,11 +178,21 @@ public class SlayerCodexRecommendationService
 		return row.getItemName() + " (" + row.getAltName() + ")";
 	}
 
-	private int compareSlot(String left, String right)
+	private static Map<String, Integer> buildSlotOrder()
 	{
 		List<String> order = List.of("HEAD", "NECK", "CAPE", "BODY", "LEGS", "WEAPON", "SHIELD", "AMMO", "HANDS", "FEET", "RING", "SPECIAL");
-		int leftIdx = order.indexOf(left);
-		int rightIdx = order.indexOf(right);
+		Map<String, Integer> lookup = new LinkedHashMap<>();
+		for (int i = 0; i < order.size(); i++)
+		{
+			lookup.put(order.get(i), i);
+		}
+		return Collections.unmodifiableMap(lookup);
+	}
+
+	private int compareSlot(String left, String right)
+	{
+		int leftIdx = SLOT_ORDER.getOrDefault(left, -1);
+		int rightIdx = SLOT_ORDER.getOrDefault(right, -1);
 		if (leftIdx == -1 && rightIdx == -1)
 		{
 			return left.compareTo(right);

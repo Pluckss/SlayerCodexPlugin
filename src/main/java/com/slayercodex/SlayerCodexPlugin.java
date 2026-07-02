@@ -17,8 +17,12 @@ import net.runelite.api.GameState;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ItemContainerChanged;
+import net.runelite.api.events.VarbitChanged;
 import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.gameval.DBTableID;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
@@ -50,6 +54,10 @@ public class SlayerCodexPlugin extends Plugin
 			+ "|return\\s+to\\s+a\\s+slayer\\s+master"
 			+ "|you\\s+can\\s+now\\s+earn\\s+slayer\\s+reward\\s+points)",
 		Pattern.CASE_INSENSITIVE);
+	private static final Pattern NUMBER_PATTERN = Pattern.compile("(\\d+)");
+	// Value of VarPlayerID.SLAYER_TARGET that means "boss task" — the actual boss is then
+	// found via VarbitID.SLAYER_TARGET_BOSSID (same lookup the core Slayer plugin uses).
+	private static final int SLAYER_TASK_BOSS_TARGET_ID = 98;
 
 	@Inject
 	private ClientToolbar clientToolbar;
@@ -89,6 +97,8 @@ public class SlayerCodexPlugin extends Plugin
 
 	private String currentTaskName;
 	private Integer currentTaskRemaining;
+	private volatile boolean lastTaskAutoSelected;
+	private int lastOwnershipSignature;
 
 	private SlayerCodexPanel panel;
 	private NavigationButton navButton;
@@ -125,6 +135,20 @@ public class SlayerCodexPlugin extends Plugin
 			final String message = ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage();
 			updateUi(() -> panel.setErrorStatus(message));
 		}
+
+		// Plugin may be toggled on mid-session — pick up the current assignment immediately.
+		// Runs after loadBundledData so the task→monster lookup has data to match against.
+		clientThread.invoke(() ->
+		{
+			if (client.getGameState() == GameState.LOGGED_IN)
+			{
+				itemResolver.warmUp();
+				if (config.autoDetectTask())
+				{
+					updateTaskFromVarps();
+				}
+			}
+		});
 
 		log.info("Slayer Codex plugin started");
 	}
@@ -219,34 +243,125 @@ public class SlayerCodexPlugin extends Plugin
 			return;
 		}
 
-		// Same task already loaded — avoid re-firing the panel update on every dialog tick.
-		if (update.taskName != null
-			&& update.taskName.equalsIgnoreCase(currentTaskName)
-			&& java.util.Objects.equals(update.remaining, currentTaskRemaining))
+		applyDetectedTask(update.taskName, update.remaining, source);
+	}
+
+	/**
+	 * Reads the Slayer assignment straight from the player's varps — the same source the
+	 * core Slayer plugin uses. Unlike chat parsing this works on login (no need to talk to
+	 * a Slayer master or check a gem) and keeps the remaining count live as kills happen.
+	 */
+	@Subscribe
+	public void onVarbitChanged(VarbitChanged event)
+	{
+		if (!config.autoDetectTask())
 		{
 			return;
 		}
 
-		currentTaskName = update.taskName;
-		currentTaskRemaining = update.remaining;
+		int varpId = event.getVarpId();
+		if (varpId != VarPlayerID.SLAYER_COUNT
+			&& varpId != VarPlayerID.SLAYER_TARGET
+			&& event.getVarbitId() != VarbitID.SLAYER_TARGET_BOSSID)
+		{
+			return;
+		}
 
-		final String key = dataStore.findBestMonsterKeyForTask(currentTaskName, config.preferBossVariant());
-		final String taskName = currentTaskName;
-		final Integer remaining = currentTaskRemaining;
+		// Defer one cycle so all task varps in the same tick have settled before we read them.
+		clientThread.invokeLater(this::updateTaskFromVarps);
+	}
+
+	private void updateTaskFromVarps()
+	{
+		int amount = client.getVarpValue(VarPlayerID.SLAYER_COUNT);
+		if (amount <= 0)
+		{
+			if (currentTaskName != null)
+			{
+				clearCurrentTask();
+				log.debug("Slayer task ended via varp");
+			}
+			return;
+		}
+
+		// Resolve the task name from the game's own slayer DB tables — the same lookup
+		// the core Slayer plugin performs in [proc,helper_slayer_current_assignment].
+		int taskId = client.getVarpValue(VarPlayerID.SLAYER_TARGET);
+		int taskDBRow;
+		if (taskId == SLAYER_TASK_BOSS_TARGET_ID)
+		{
+			var bossRows = client.getDBRowsByValue(
+				DBTableID.SlayerTaskSublist.ID,
+				DBTableID.SlayerTaskSublist.COL_TASK_SUBTABLE_ID,
+				0,
+				client.getVarbitValue(VarbitID.SLAYER_TARGET_BOSSID));
+			if (bossRows.isEmpty())
+			{
+				return;
+			}
+			taskDBRow = (Integer) client.getDBTableField(bossRows.get(0), DBTableID.SlayerTaskSublist.COL_TASK, 0)[0];
+		}
+		else
+		{
+			var taskRows = client.getDBRowsByValue(DBTableID.SlayerTask.ID, DBTableID.SlayerTask.COL_ID, 0, taskId);
+			if (taskRows.isEmpty())
+			{
+				return;
+			}
+			taskDBRow = taskRows.get(0);
+		}
+
+		String taskName = (String) client.getDBTableField(taskDBRow, DBTableID.SlayerTask.COL_NAME_UPPERCASE, 0)[0];
+		if (taskName == null || taskName.trim().isEmpty())
+		{
+			return;
+		}
+
+		applyDetectedTask(taskName, amount, "varp");
+	}
+
+	private void applyDetectedTask(String taskName, Integer remaining, String source)
+	{
+		if (taskName == null)
+		{
+			return;
+		}
+
+		boolean sameTask = taskName.equalsIgnoreCase(currentTaskName);
+		if (sameTask && java.util.Objects.equals(remaining, currentTaskRemaining))
+		{
+			// Same task already loaded — avoid re-firing the panel update on every dialog tick.
+			return;
+		}
+
+		currentTaskName = taskName;
+		currentTaskRemaining = remaining;
+
+		final Integer remainingFinal = remaining;
+		if (sameTask)
+		{
+			// Only the kill count moved — update the header pill without re-running the
+			// monster lookup or yanking the panel selection back to the task's monster.
+			updateUi(() -> panel.setCurrentTask(taskName, remainingFinal, lastTaskAutoSelected));
+			return;
+		}
+
+		final String key = dataStore.findBestMonsterKeyForTask(taskName, config.preferBossVariant());
 		updateUi(() ->
 		{
 			panel.setCurrentTaskTarget(key);
 			boolean autoSelected = panel.selectMonsterByKey(key);
+			lastTaskAutoSelected = autoSelected;
 			if (key == null)
 			{
 				// Detected the task but the bundled dataset has no strategy for it — surface the
 				// task name in the panel with a wiki link so the player still gets useful info.
 				panel.setTaskWithoutStrategy(taskName);
 			}
-			panel.setCurrentTask(taskName, remaining, autoSelected);
+			panel.setCurrentTask(taskName, remainingFinal, autoSelected);
 		});
 
-		log.debug("Detected task via {}: {} ({}) -> {}", source, currentTaskName, currentTaskRemaining, key);
+		log.debug("Detected task via {}: {} ({}) -> {}", source, taskName, remaining, key);
 	}
 
 	private void clearCurrentTask()
@@ -286,6 +401,16 @@ public class SlayerCodexPlugin extends Plugin
 		boolean wasIndexed = itemResolver.isIndexed();
 		itemResolver.warmUp();
 		boolean justIndexed = !wasIndexed && itemResolver.isIndexed();
+
+		// Inventory changes constantly during combat; only rebuild the panel when the
+		// ownership status of an item the current view actually cares about changed.
+		int signature = ownershipSignature();
+		if (!justIndexed && signature == lastOwnershipSignature)
+		{
+			return;
+		}
+		lastOwnershipSignature = signature;
+
 		updateUi(() ->
 		{
 			panel.refreshRecommendations();
@@ -294,6 +419,20 @@ public class SlayerCodexPlugin extends Plugin
 				panel.refreshFocus();
 			}
 		});
+	}
+
+	private int ownershipSignature()
+	{
+		int hash = ownershipTracker.isBankKnown() ? 1 : 0;
+		for (int id : taskState.getRelevantItemIds())
+		{
+			int status = (ownershipTracker.getOwnedQuantity(id) > 0 ? 4 : 0)
+				| (ownershipTracker.isEquipped(id) ? 2 : 0)
+				| (ownershipTracker.isInBank(id) ? 1 : 0);
+			hash = 31 * hash + id;
+			hash = 31 * hash + status;
+		}
+		return hash;
 	}
 
 	@Override
@@ -348,6 +487,12 @@ public class SlayerCodexPlugin extends Plugin
 				// Index just became available — re-fire focus listener so the previously-empty
 				// taskState picks up the now-resolvable item ids.
 				updateUi(() -> panel.refreshFocus());
+			}
+
+			if (state == GameState.LOGGED_IN && config.autoDetectTask())
+			{
+				// Sync the assignment straight from varps — no chat message needed.
+				updateTaskFromVarps();
 			}
 		});
 	}
@@ -423,7 +568,8 @@ public class SlayerCodexPlugin extends Plugin
 		return image;
 	}
 
-	private TaskUpdate parseTaskUpdate(String message)
+	// Package-private and static so the chat-parsing logic is unit-testable.
+	static TaskUpdate parseTaskUpdate(String message)
 	{
 		Matcher assignment = ASSIGNMENT_PATTERN.matcher(message);
 		if (assignment.find())
@@ -460,7 +606,7 @@ public class SlayerCodexPlugin extends Plugin
 		return null;
 	}
 
-	private String cleanupTaskName(String task)
+	static String cleanupTaskName(String task)
 	{
 		if (task == null)
 		{
@@ -512,9 +658,9 @@ public class SlayerCodexPlugin extends Plugin
 		return title.toString().trim();
 	}
 
-	private Integer extractFirstNumber(String text)
+	private static Integer extractFirstNumber(String text)
 	{
-		Matcher matcher = Pattern.compile("(\\d+)").matcher(text);
+		Matcher matcher = NUMBER_PATTERN.matcher(text);
 		if (matcher.find())
 		{
 			return Integer.parseInt(matcher.group(1));
@@ -522,10 +668,10 @@ public class SlayerCodexPlugin extends Plugin
 		return null;
 	}
 
-	private static final class TaskUpdate
+	static final class TaskUpdate
 	{
-		private final String taskName;
-		private final Integer remaining;
+		final String taskName;
+		final Integer remaining;
 
 		private TaskUpdate(String taskName, Integer remaining)
 		{

@@ -9,6 +9,7 @@ import java.awt.Font;
 import java.awt.GridLayout;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -75,7 +76,6 @@ public class SlayerCodexPanel extends PluginPanel
 	private final JLabel taskIconLabel = new JLabel();
 	private final JButton taskActionButton = new JButton("Open Task Setup");
 	private final JButton browserToggleButton = new JButton("Browse Strategies");
-	private final JButton browseAllButton = new JButton("Browse all monsters");
 	private final JTextField searchField = new JTextField();
 	private final DefaultListModel<SlayerCodexDataStore.MonsterSummary> listModel = new DefaultListModel<>();
 	private final JList<SlayerCodexDataStore.MonsterSummary> monsterList = new JList<>(listModel);
@@ -99,6 +99,9 @@ public class SlayerCodexPanel extends PluginPanel
 
 	private List<SlayerCodexDataStore.MonsterSummary> allMonsters = Collections.emptyList();
 	private Map<String, SlayerCodexDataStore.MonsterSummary> summaryByKey = Collections.emptyMap();
+	// Parallel to allMonsters — lowercase names so the search filter doesn't re-lowercase
+	// every monster name on every keystroke.
+	private List<String> searchableNames = Collections.emptyList();
 	private List<GearMatrixRow> currentMatrixRows = Collections.emptyList();
 	private String currentTaskMonsterKey;
 	private boolean browserExpanded;
@@ -137,17 +140,20 @@ public class SlayerCodexPanel extends PluginPanel
 	{
 		allMonsters = dataStore.getMonsterSummaries();
 		Map<String, SlayerCodexDataStore.MonsterSummary> byKey = new LinkedHashMap<>();
+		List<String> lowerNames = new ArrayList<>(allMonsters.size());
 		for (SlayerCodexDataStore.MonsterSummary summary : allMonsters)
 		{
 			byKey.put(summary.getKey(), summary);
+			lowerNames.add(summary.getName().toLowerCase(Locale.ENGLISH));
 		}
 		summaryByKey = byKey;
+		searchableNames = lowerNames;
 		filterMonsters();
 	}
 
 	public void setDataStatus(int monsterCount, String crawlDate)
 	{
-		statusLabel.setText("Search monsters and pick a setup");
+		statusLabel.setText(monsterCount + " monsters · wiki data from " + crawlDate);
 		recommendationStatusLabel.setText(recommendationService.buildBestSetupStatus());
 	}
 
@@ -177,7 +183,7 @@ public class SlayerCodexPanel extends PluginPanel
 		}
 
 		StringBuilder pillText = new StringBuilder("ON TASK");
-		if (remaining != null)
+		if (remaining != null && config.showTaskCountdown())
 		{
 			pillText.append(" · ").append(remaining).append(" left");
 		}
@@ -376,17 +382,30 @@ public class SlayerCodexPanel extends PluginPanel
 	{
 		recommendationStatusLabel.setText(recommendationService.buildBestSetupStatus());
 		// Hide bank hint once bank has been seen this session
-		if (ownershipTracker.isBankKnown())
+		bankHintPanel.setVisible(!ownershipTracker.isBankKnown());
+		refreshCurrentStyleRows();
+	}
+
+	/**
+	 * Rebuilds the gear rows for the current style without disturbing what the user is
+	 * doing: the selected slot (and its notes below) survive ownership-driven refreshes,
+	 * unlike a style change where the selection is intentionally reset.
+	 */
+	private void refreshCurrentStyleRows()
+	{
+		if (currentMonster == null || currentStyle == null)
 		{
-			bankHintPanel.setVisible(false);
+			return;
 		}
-		else
+
+		int selected = gearTable.getSelectedRow();
+		List<GearMatrixRow> matrixRows = buildGearMatrixRows(currentStyle);
+		currentMatrixRows = matrixRows;
+		gearTableModel.setRows(matrixRows);
+		if (selected >= 0 && selected < matrixRows.size())
 		{
-			bankHintPanel.setVisible(true);
-		}
-		if (currentStyle != null)
-		{
-			onCombatStyleChanged(currentStyle);
+			// Restoring the selection re-fires the listener, which re-renders the notes.
+			gearTable.setRowSelectionInterval(selected, selected);
 		}
 	}
 
@@ -687,7 +706,6 @@ public class SlayerCodexPanel extends PluginPanel
 			}
 		});
 		browserToggleButton.addActionListener(event -> setBrowserExpanded(!browserExpanded));
-		browseAllButton.addActionListener(event -> setBrowserExpanded(true));
 		taskActionButton.addActionListener(event ->
 		{
 			boolean ok = selectMonsterByKey(currentTaskMonsterKey);
@@ -714,14 +732,18 @@ public class SlayerCodexPanel extends PluginPanel
 		String query = searchField.getText() == null ? "" : searchField.getText().trim().toLowerCase(Locale.ENGLISH);
 		SlayerCodexDataStore.MonsterSummary selected = monsterList.getSelectedValue();
 
-		listModel.clear();
-		for (SlayerCodexDataStore.MonsterSummary summary : allMonsters)
+		List<SlayerCodexDataStore.MonsterSummary> matches = new ArrayList<>(allMonsters.size());
+		for (int i = 0; i < allMonsters.size(); i++)
 		{
-			if (query.isEmpty() || summary.getName().toLowerCase(Locale.ENGLISH).contains(query))
+			if (query.isEmpty() || searchableNames.get(i).contains(query))
 			{
-				listModel.addElement(summary);
+				matches.add(allMonsters.get(i));
 			}
 		}
+
+		// Batch update — one clear + one addAll instead of a model event per monster.
+		listModel.clear();
+		listModel.addAll(matches);
 
 		if (listModel.isEmpty())
 		{
@@ -1278,13 +1300,29 @@ public class SlayerCodexPanel extends PluginPanel
 
 	private final class GearCellRenderer extends DefaultTableCellRenderer
 	{
+		private final Font slotFont = new Font("SansSerif", Font.PLAIN, 10);
+		private final Font cellFont = new Font("SansSerif", Font.PLAIN, 11);
+		// Cell renderers repaint constantly — cache icons per item id so we don't allocate
+		// a new ImageIcon (and register another onLoaded callback) on every paint.
+		private final Map<Integer, ImageIcon> iconCache = new HashMap<>();
+
+		private ImageIcon iconForItem(int itemId)
+		{
+			return iconCache.computeIfAbsent(itemId, id ->
+			{
+				AsyncBufferedImage image = itemManager.getImage(id);
+				image.onLoaded(() -> SwingUtilities.invokeLater(gearTable::repaint));
+				return new ImageIcon(image);
+			});
+		}
+
 		@Override
 		public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int col)
 		{
 			Component component = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, col);
 			setIcon(null);
 			setHorizontalAlignment(CENTER);
-			setFont(new Font("SansSerif", Font.PLAIN, col == 0 ? 10 : 11));
+			setFont(col == 0 ? slotFont : cellFont);
 			if (!isSelected)
 			{
 				component.setBackground(col == 0 ? new Color(34, 41, 53) : BG_CARD_ALT);
@@ -1321,9 +1359,7 @@ public class SlayerCodexPanel extends PluginPanel
 				setText(shortCellLabel(cell));
 				if (cell.getItemId() > 0)
 				{
-					AsyncBufferedImage image = itemManager.getImage(cell.getItemId());
-					setIcon(new ImageIcon(image));
-					image.onLoaded(() -> SwingUtilities.invokeLater(table::repaint));
+					setIcon(iconForItem(cell.getItemId()));
 				}
 
 				String toolTip = cell.getLabel();

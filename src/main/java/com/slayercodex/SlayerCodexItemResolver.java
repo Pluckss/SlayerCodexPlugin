@@ -20,8 +20,11 @@ public class SlayerCodexItemResolver
 	private final Client client;
 	private final ItemManager itemManager;
 
-	private Map<String, List<Integer>> itemIdsByName = Collections.emptyMap();
-	private boolean indexed;
+	// Written once by the client thread in warmUp(), read lock-free from the EDT.
+	// Volatile immutable-map swap means lookups never block while the index builds
+	// and never trigger item-cache access from the wrong thread.
+	private volatile Map<String, List<Integer>> itemIdsByName = Collections.emptyMap();
+	private volatile boolean indexed;
 
 	@Inject
 	public SlayerCodexItemResolver(Client client, ItemManager itemManager)
@@ -30,13 +33,12 @@ public class SlayerCodexItemResolver
 		this.itemManager = itemManager;
 	}
 
-	public synchronized List<Integer> resolveItemIds(String itemName, String altName)
+	public List<Integer> resolveItemIds(String itemName, String altName)
 	{
-		ensureIndex();
-
+		Map<String, List<Integer>> index = itemIdsByName;
 		LinkedHashSet<Integer> ids = new LinkedHashSet<>();
-		addMatches(ids, itemName);
-		addMatches(ids, altName);
+		addMatches(index, ids, itemName);
+		addMatches(index, ids, altName);
 		return ids.isEmpty() ? Collections.emptyList() : new ArrayList<>(ids);
 	}
 
@@ -46,22 +48,18 @@ public class SlayerCodexItemResolver
 		return ids.isEmpty() ? -1 : ids.get(0);
 	}
 
-	public synchronized boolean isIndexed()
+	public boolean isIndexed()
 	{
 		return indexed;
 	}
 
 	/**
-	 * Forces a fresh attempt to build the name → item-id index. Safe to call multiple times;
-	 * skips the work if the index was already built successfully. If the item cache is not
-	 * yet loaded, leaves {@code indexed} false so a future call can retry.
+	 * Builds the name → item-id index if it hasn't been built yet. Must be called on the
+	 * client thread (reads item compositions). Safe to call multiple times; skips the work
+	 * once the index was built successfully. If the item cache is not yet loaded, leaves
+	 * {@code indexed} false so a future call can retry.
 	 */
 	public synchronized void warmUp()
-	{
-		ensureIndex();
-	}
-
-	private void ensureIndex()
 	{
 		if (indexed)
 		{
@@ -106,11 +104,11 @@ public class SlayerCodexItemResolver
 		indexed = true;
 	}
 
-	private void addMatches(Collection<Integer> out, String rawName)
+	private void addMatches(Map<String, List<Integer>> index, Collection<Integer> out, String rawName)
 	{
 		for (String variant : getLookupVariants(rawName))
 		{
-			List<Integer> ids = itemIdsByName.get(variant);
+			List<Integer> ids = index.get(variant);
 			if (ids != null)
 			{
 				out.addAll(ids);

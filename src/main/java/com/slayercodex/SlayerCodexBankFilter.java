@@ -71,6 +71,12 @@ public class SlayerCodexBankFilter
 
 	public void shutDown()
 	{
+		// If the filter is active while the bank is open, put the hidden/repacked
+		// items back before the plugin goes away.
+		if (filterActive)
+		{
+			clientThread.invoke(this::unhideAllItems);
+		}
 		filterActive = false;
 		toggleWidget = null;
 	}
