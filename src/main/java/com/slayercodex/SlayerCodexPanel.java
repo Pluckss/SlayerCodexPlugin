@@ -83,7 +83,7 @@ public class SlayerCodexPanel extends PluginPanel
 	private final JLabel detailsMetaLabel = createMutedLabel("Pick a monster from the list");
 	private final JLabel recommendationStatusLabel = createMutedLabel("Your Best uses equipped and inve...");
 	private final JPanel bankHintPanel = new JPanel(new BorderLayout(6, 0));
-	private final JLabel bankHintLabel = new JLabel("⚠  Open your bank once for full gear picks");
+	private final JLabel bankHintLabel = new JLabel("⚠  Open bank once to see owned gear");
 	private final JButton wikiButton = new JButton("Wiki");
 	private final JPanel styleButtonPanel = new JPanel();
 	private final GearMatrixTableModel gearTableModel = new GearMatrixTableModel();
@@ -615,10 +615,12 @@ public class SlayerCodexPanel extends PluginPanel
 		gearTable.getTableHeader().setForeground(TEXT_MAIN);
 		gearTable.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 11));
 		gearTable.setDefaultRenderer(Object.class, new GearCellRenderer());
-		gearTable.getColumnModel().getColumn(0).setMinWidth(44);
-		gearTable.getColumnModel().getColumn(0).setPreferredWidth(52);
-		gearTable.getColumnModel().getColumn(1).setPreferredWidth(90);
-		gearTable.getColumnModel().getColumn(2).setPreferredWidth(104);
+		// Slot codes are 2-3 chars ("Hd", "Sp*") — keep the column tight so the two
+		// item columns get every spare pixel for readable names.
+		gearTable.getColumnModel().getColumn(0).setMinWidth(34);
+		gearTable.getColumnModel().getColumn(0).setPreferredWidth(38);
+		gearTable.getColumnModel().getColumn(1).setPreferredWidth(100);
+		gearTable.getColumnModel().getColumn(2).setPreferredWidth(100);
 
 		JScrollPane tableScroll = new JScrollPane(gearTable);
 		tableScroll.setBorder(BorderFactory.createLineBorder(BORDER));
@@ -686,6 +688,22 @@ public class SlayerCodexPanel extends PluginPanel
 				if (!event.getValueIsAdjusting())
 				{
 					onMonsterSelected(monsterList.getSelectedValue());
+				}
+			}
+		});
+
+		// Collapse the browser when the user clicks a monster so the strategy they just
+		// picked is actually visible — the panel is too short to show both at once.
+		// Mouse-only on purpose: programmatic reselection during search filtering must
+		// not yank the list away mid-typing.
+		monsterList.addMouseListener(new java.awt.event.MouseAdapter()
+		{
+			@Override
+			public void mouseClicked(java.awt.event.MouseEvent event)
+			{
+				if (monsterList.getSelectedValue() != null)
+				{
+					setBrowserExpanded(false);
 				}
 			}
 		});
@@ -963,13 +981,13 @@ public class SlayerCodexPanel extends PluginPanel
 			JToggleButton button = new JToggleButton(style.getName());
 			styleButton(button, true);
 			button.setFont(new Font("SansSerif", Font.BOLD, 10));
-			button.setBorder(BorderFactory.createCompoundBorder(
-				BorderFactory.createLineBorder(BORDER),
-				BorderFactory.createEmptyBorder(3, 6, 3, 6)
-			));
 			button.setPreferredSize(new Dimension(0, 24));
 			button.setToolTipText(style.getName());
 			button.addActionListener(event -> onCombatStyleChanged(style));
+			// The LAF's default pressed shading is nearly invisible on our dark theme —
+			// paint the active style blue so it's obvious which tab is showing.
+			button.addItemListener(event -> applyStyleToggleAppearance(button));
+			applyStyleToggleAppearance(button);
 			styleButtons.add(button);
 			styleGroup.add(button);
 			styleButtonPanel.add(button);
@@ -977,6 +995,17 @@ public class SlayerCodexPanel extends PluginPanel
 
 		styleButtonPanel.revalidate();
 		styleButtonPanel.repaint();
+	}
+
+	private void applyStyleToggleAppearance(JToggleButton button)
+	{
+		boolean selected = button.isSelected();
+		button.setBackground(selected ? new Color(28, 63, 110) : BG_CARD_ALT);
+		button.setForeground(selected ? Color.WHITE : TEXT_MUTED);
+		button.setBorder(BorderFactory.createCompoundBorder(
+			BorderFactory.createLineBorder(selected ? BLUE_ACCENT : BORDER),
+			BorderFactory.createEmptyBorder(3, 6, 3, 6)
+		));
 	}
 
 	private void onCombatStyleChanged(SlayerCodexDataStore.CombatStyleDetails style)
@@ -1411,26 +1440,11 @@ public class SlayerCodexPanel extends PluginPanel
 				return "-";
 			}
 
-			String[] parts = label.split("\\s+");
-			if (parts.length == 1)
-			{
-				return trimToWidth(parts[0], 8);
-			}
-
-			StringBuilder shortLabel = new StringBuilder();
-			for (int index = 0; index < Math.min(2, parts.length); index++)
-			{
-				if (parts[index].isEmpty())
-				{
-					continue;
-				}
-				if (shortLabel.length() > 0)
-				{
-					shortLabel.append(' ');
-				}
-				shortLabel.append(trimToWidth(parts[index], 4));
-			}
-			return shortLabel.toString();
+			// Drop the "(alt name)" suffix — the tooltip carries the full text. The
+			// renderer ellipsizes to the cell width, so pre-shortening to word stubs
+			// only destroys information ("Slayer helmet" would become "Sl. hel.").
+			int altStart = label.indexOf(" (");
+			return altStart > 0 ? label.substring(0, altStart) : label;
 		}
 
 		private String trimToWidth(String value, int maxLength)

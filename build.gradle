@@ -39,7 +39,11 @@ tasks.register('run', JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass = pluginMainClass
 
-	jvmArgs "-ea"
+	// --add-opens needed on JDK 17+: ExternalPluginManager.loadBuiltin reflects on
+	// java.lang.reflect internals and dies with InaccessibleObjectException otherwise.
+	jvmArgs "-ea",
+		"--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+		"--add-opens=java.base/java.lang=ALL-UNNAMED"
 	args "--developer-mode", "--debug"
 }
 
