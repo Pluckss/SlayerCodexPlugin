@@ -13,9 +13,11 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.zip.GZIPInputStream;
 import javax.inject.Singleton;
 
@@ -28,9 +30,24 @@ public class SlayerCodexDataStore
 	// Fully parsed at load so the multi-megabyte Gson DOM can be garbage collected
 	// instead of living in the client's heap for the whole session.
 	private Map<String, MonsterDetails> detailsByKey = Collections.emptyMap();
-	// Pre-normalized (normalized, singular, key) rows for the fuzzy task-name fallback.
-	private List<String[]> normalizedNameIndex = Collections.emptyList();
 	private String crawlDate = "unknown";
+
+	/**
+	 * Task names whose strategy lives under a differently-named page. Only for cases where the
+	 * dataset entry is genuinely killable on that task — never a "close enough" guess. Keys are
+	 * normalized task names (lowercase, alphanumerics only).
+	 */
+	private static final Map<String, String> TASK_ALIASES = buildTaskAliases();
+
+	private static Map<String, String> buildTaskAliases()
+	{
+		Map<String, String> aliases = new LinkedHashMap<>();
+		// Basilisk Knights are assigned under, and killable on, the Basilisks task.
+		aliases.put("basilisk", "basilisk_knight");
+		// Shellbane gryphons are the Varlamore gryphon assigned on the Gryphons task.
+		aliases.put("gryphon", "shellbane_gryphon");
+		return Collections.unmodifiableMap(aliases);
+	}
 
 	public void load() throws IOException
 	{
@@ -52,7 +69,7 @@ public class SlayerCodexDataStore
 		JsonObject monsters = root.getAsJsonObject("monsters");
 		monsterSummaries = buildSummaries(monsters);
 		taskNameToMonsterKey = buildTaskLookup(monsterSummaries);
-		baseTaskToBossKey = buildBossLookup(root);
+		baseTaskToBossKey = buildBossLookup(root, monsterSummaries);
 		crawlDate = readCrawlDate(root);
 
 		Map<String, MonsterDetails> details = new LinkedHashMap<>();
@@ -73,13 +90,6 @@ public class SlayerCodexDataStore
 		}
 		detailsByKey = Collections.unmodifiableMap(details);
 
-		List<String[]> nameIndex = new ArrayList<>(monsterSummaries.size());
-		for (MonsterSummary summary : monsterSummaries)
-		{
-			String norm = normalize(summary.getName());
-			nameIndex.add(new String[] {norm, toSingular(norm), summary.getKey()});
-		}
-		normalizedNameIndex = nameIndex;
 	}
 
 	public int getMonsterCount()
@@ -114,17 +124,47 @@ public class SlayerCodexDataStore
 		{
 			return null;
 		}
-		String bossKey = baseTaskToBossKey.get(baseKey);
-		if (bossKey != null && detailsByKey.containsKey(bossKey))
-		{
-			return bossKey;
-		}
-		return null;
+		// baseTaskToBossKey is keyed by normalized task name; monster keys are snake_case.
+		String normalizedBase = normalize(baseKey.replace('_', ' '));
+		return firstPresentKey(
+			baseTaskToBossKey.get(normalizedBase),
+			baseTaskToBossKey.get(toSingular(normalizedBase)));
 	}
 
 	public MonsterDetails getMonsterDetails(String key)
 	{
 		return key == null ? null : detailsByKey.get(key);
+	}
+
+	/**
+	 * Every gear item name (and alt name) referenced anywhere in the bundled dataset.
+	 * Lets {@link SlayerCodexItemResolver} index only the items this plugin can ever ask
+	 * about instead of every item in the game.
+	 */
+	public Set<String> getAllGearItemNames()
+	{
+		Set<String> names = new LinkedHashSet<>();
+		for (MonsterDetails details : detailsByKey.values())
+		{
+			for (CombatStyleDetails style : details.getCombatStyles())
+			{
+				for (List<GearRow> rows : style.getTierRows().values())
+				{
+					for (GearRow row : rows)
+					{
+						if (row.getItemName() != null && !row.getItemName().isEmpty())
+						{
+							names.add(row.getItemName());
+						}
+						if (row.getAltName() != null && !row.getAltName().isEmpty())
+						{
+							names.add(row.getAltName());
+						}
+					}
+				}
+			}
+		}
+		return Collections.unmodifiableSet(names);
 	}
 
 	private MonsterDetails parseMonsterDetails(String key, JsonObject monster)
@@ -406,6 +446,17 @@ public class SlayerCodexDataStore
 		return sortedTierRows;
 	}
 
+	/**
+	 * Resolves a Slayer task name (as reported by the game's own slayer DB tables) to a
+	 * monster key in the bundled dataset, or null when nothing sensible matches.
+	 *
+	 * <p>Matching is deliberately strict — exact normalized name/key, then a naive plural
+	 * fold, then an explicit alias table. An earlier revision also indexed the last word of
+	 * every multi-word name and fell back to bidirectional substring matching; both produced
+	 * only false positives against the real task list (a "Hydras" task resolved to Alchemical
+	 * Hydra, "Rats" to Barbarian Assault), so returning null and letting the panel show its
+	 * "no strategy bundled" state is strictly better than guessing.
+	 */
 	public String findBestMonsterKeyForTask(String taskName, boolean preferBossVariant)
 	{
 		if (taskName == null || taskName.trim().isEmpty())
@@ -415,45 +466,44 @@ public class SlayerCodexDataStore
 
 		String normalized = normalize(taskName);
 		String singularNormalized = toSingular(normalized);
-		String key = taskNameToMonsterKey.get(normalized);
-		if (key == null)
-		{
-			key = taskNameToMonsterKey.get(singularNormalized);
-		}
 
-		if (key == null)
-		{
-			for (String[] entry : normalizedNameIndex)
-			{
-				String summaryNorm = entry[0];
-				String summarySingular = entry[1];
-				if (summaryNorm.contains(normalized)
-					|| summaryNorm.contains(singularNormalized)
-					|| summarySingular.contains(singularNormalized)
-					|| normalized.contains(summaryNorm)
-					|| singularNormalized.contains(summarySingular))
-				{
-					key = entry[2];
-					break;
-				}
-			}
-		}
+		String key = firstPresentKey(
+			taskNameToMonsterKey.get(normalized),
+			taskNameToMonsterKey.get(singularNormalized),
+			TASK_ALIASES.get(normalized),
+			TASK_ALIASES.get(singularNormalized));
 
-		if (key == null)
-		{
-			return null;
-		}
+		// Boss variants are keyed by task name, not by base monster key: most base monsters
+		// (cave kraken, kalphites, hellhounds...) have no strategy page of their own, so a
+		// lookup that required the base to exist in the dataset would never fire.
+		String bossKey = firstPresentKey(
+			baseTaskToBossKey.get(normalized),
+			baseTaskToBossKey.get(singularNormalized));
 
-		if (preferBossVariant)
+		if (bossKey != null && (preferBossVariant || key == null))
 		{
-			String bossKey = baseTaskToBossKey.get(key);
-			if (bossKey != null && detailsByKey.containsKey(bossKey))
-			{
-				return bossKey;
-			}
+			// Either the player asked for boss variants, or we have no base strategy at all
+			// and the boss is killable on this task — showing it beats showing nothing.
+			return bossKey;
 		}
 
 		return key;
+	}
+
+	/**
+	 * Returns the first candidate that names a monster actually present in the dataset.
+	 * Guards every lookup path against stale keys in the crawler output.
+	 */
+	private String firstPresentKey(String... candidates)
+	{
+		for (String candidate : candidates)
+		{
+			if (candidate != null && detailsByKey.containsKey(candidate))
+			{
+				return candidate;
+			}
+		}
+		return null;
 	}
 
 	private List<MonsterSummary> buildSummaries(JsonObject monstersObject)
@@ -495,24 +545,27 @@ public class SlayerCodexDataStore
 			lookup.putIfAbsent(toSingular(normalizedName), key);
 			lookup.putIfAbsent(normalizedKey, key);
 			lookup.putIfAbsent(toSingular(normalizedKey), key);
-
-			String[] words = summary.getName().toLowerCase().split("\\s+");
-			if (words.length > 1)
-			{
-				String lastWord = normalize(words[words.length - 1]);
-				lookup.putIfAbsent(lastWord, key);
-				lookup.putIfAbsent(toSingular(lastWord), key);
-			}
 		}
 		return Collections.unmodifiableMap(lookup);
 	}
 
-	private Map<String, String> buildBossLookup(JsonObject rootObject)
+	/**
+	 * Builds task-name → boss-monster-key. Keyed by the normalized base *task* name so it
+	 * resolves straight off the assignment, and tolerant of crawler key drift on the boss
+	 * side (the dataset has shipped e.g. "vet_ion" where the monster key is "vetion").
+	 */
+	private Map<String, String> buildBossLookup(JsonObject rootObject, List<MonsterSummary> summaries)
 	{
 		JsonObject bossVariants = getObject(rootObject, "boss_variants");
 		if (bossVariants == null)
 		{
 			return Collections.emptyMap();
+		}
+
+		Map<String, String> keysByNormalized = new LinkedHashMap<>();
+		for (MonsterSummary summary : summaries)
+		{
+			keysByNormalized.putIfAbsent(normalize(summary.getKey()), summary.getKey());
 		}
 
 		Map<String, String> lookup = new LinkedHashMap<>();
@@ -523,13 +576,21 @@ public class SlayerCodexDataStore
 				continue;
 			}
 
-			JsonObject mapping = entry.getValue().getAsJsonObject();
-			String base = entry.getKey();
-			String boss = getString(mapping, "boss");
-			if (boss != null)
+			String boss = getString(entry.getValue().getAsJsonObject(), "boss");
+			if (boss == null)
 			{
-				lookup.put(base, boss);
+				continue;
 			}
+
+			String bossKey = keysByNormalized.get(normalize(boss));
+			if (bossKey == null)
+			{
+				continue;
+			}
+
+			String normalizedBase = normalize(entry.getKey().replace('_', ' '));
+			lookup.putIfAbsent(normalizedBase, bossKey);
+			lookup.putIfAbsent(toSingular(normalizedBase), bossKey);
 		}
 
 		return Collections.unmodifiableMap(lookup);

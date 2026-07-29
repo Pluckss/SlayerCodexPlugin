@@ -8,6 +8,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import net.runelite.api.Client;
@@ -19,6 +20,7 @@ public class SlayerCodexItemResolver
 {
 	private final Client client;
 	private final ItemManager itemManager;
+	private final SlayerCodexDataStore dataStore;
 
 	// Written once by the client thread in warmUp(), read lock-free from the EDT.
 	// Volatile immutable-map swap means lookups never block while the index builds
@@ -27,10 +29,11 @@ public class SlayerCodexItemResolver
 	private volatile boolean indexed;
 
 	@Inject
-	public SlayerCodexItemResolver(Client client, ItemManager itemManager)
+	public SlayerCodexItemResolver(Client client, ItemManager itemManager, SlayerCodexDataStore dataStore)
 	{
 		this.client = client;
 		this.itemManager = itemManager;
+		this.dataStore = dataStore;
 	}
 
 	public List<Integer> resolveItemIds(String itemName, String altName)
@@ -58,6 +61,11 @@ public class SlayerCodexItemResolver
 	 * client thread (reads item compositions). Safe to call multiple times; skips the work
 	 * once the index was built successfully. If the item cache is not yet loaded, leaves
 	 * {@code indexed} false so a future call can retry.
+	 *
+	 * <p>Only names the bundled dataset can actually ask about are kept (~900 of the game's
+	 * ~30k items). The full scan still has to happen — item compositions are the only way to
+	 * map a name back to an id — but the retained map is a fraction of the size, and the
+	 * lookups it serves are exactly the ones {@link #resolveItemIds} can issue.
 	 */
 	public synchronized void warmUp()
 	{
@@ -73,6 +81,14 @@ public class SlayerCodexItemResolver
 			return;
 		}
 
+		Set<String> wanted = buildWantedVariants();
+		if (wanted.isEmpty())
+		{
+			// Strategy data hasn't loaded yet — retry once it has rather than caching an
+			// index that would filter everything out.
+			return;
+		}
+
 		Map<String, LinkedHashSet<Integer>> resolved = new LinkedHashMap<>();
 		for (int itemId = 0; itemId < itemCount; itemId++)
 		{
@@ -83,8 +99,8 @@ public class SlayerCodexItemResolver
 				continue;
 			}
 
-			registerName(resolved, item.getName(), canonicalId);
-			registerName(resolved, item.getMembersName(), canonicalId);
+			registerName(resolved, wanted, item.getName(), canonicalId);
+			registerName(resolved, wanted, item.getMembersName(), canonicalId);
 		}
 
 		if (resolved.isEmpty())
@@ -116,11 +132,33 @@ public class SlayerCodexItemResolver
 		}
 	}
 
-	private void registerName(Map<String, LinkedHashSet<Integer>> target, String rawName, int itemId)
+	/**
+	 * The set of normalized names {@link #resolveItemIds} could ever be called with, derived
+	 * from the dataset via the same variant expansion used at lookup time — so filtering the
+	 * index by it cannot drop a name that would later be queried.
+	 */
+	private Set<String> buildWantedVariants()
+	{
+		Set<String> wanted = new LinkedHashSet<>();
+		for (String name : dataStore.getAllGearItemNames())
+		{
+			wanted.addAll(getLookupVariants(name));
+		}
+		return wanted;
+	}
+
+	private void registerName(
+		Map<String, LinkedHashSet<Integer>> target,
+		Set<String> wanted,
+		String rawName,
+		int itemId)
 	{
 		for (String variant : getLookupVariants(rawName))
 		{
-			target.computeIfAbsent(variant, ignored -> new LinkedHashSet<>()).add(itemId);
+			if (wanted.contains(variant))
+			{
+				target.computeIfAbsent(variant, ignored -> new LinkedHashSet<>()).add(itemId);
+			}
 		}
 	}
 
